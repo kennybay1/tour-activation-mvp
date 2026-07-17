@@ -60,14 +60,37 @@ export async function POST(
     return NextResponse.json({ error: "campaign_not_found" }, { status: 404 });
   }
 
+  const sessionId = typeof session_id === "string" ? session_id : null;
   const { error: insertError } = await db.from("events").insert({
     campaign_id: campaign.id,
-    session_id: typeof session_id === "string" ? session_id : null,
+    session_id: sessionId,
     event_type,
     metadata: metadata ?? null,
   });
   if (insertError) {
     return NextResponse.json({ error: "server_error" }, { status: 500 });
+  }
+
+  // A ticket_click from a session that previously unlocked stamps the claim,
+  // so claims.ticket_clicked_at reflects reality for reporting.
+  if (event_type === "ticket_click" && sessionId) {
+    const { data: unlockEvent } = await db
+      .from("events")
+      .select("claim_id")
+      .eq("campaign_id", campaign.id)
+      .eq("session_id", sessionId)
+      .eq("event_type", "unlock_success")
+      .not("claim_id", "is", null)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (unlockEvent?.claim_id) {
+      await db
+        .from("claims")
+        .update({ ticket_clicked_at: new Date().toISOString() })
+        .eq("id", unlockEvent.claim_id)
+        .is("ticket_clicked_at", null);
+    }
   }
 
   return NextResponse.json({ ok: true });
