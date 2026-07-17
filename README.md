@@ -68,3 +68,34 @@ Body: `{ slug, session_id, event_type, metadata }`
 - `event_type` must be one of: `page_view`, `permission_granted`, `permission_denied`, `location_error`, `register`, `ticket_click` (HTTP 400 otherwise).
 - The campaign id is resolved from `slug` (HTTP 404 if unknown), then the event is inserted into `events`.
 - Returns `{ "ok": true }`. Never returns reward fields.
+
+## Deploying to Vercel
+
+### Environment variable checklist
+
+Add these three in Vercel under **Project Settings → Environment Variables** (all three for the Production environment; add them to Preview too if you want working preview deploys):
+
+| Variable | Value | Exposed to browser? |
+| --- | --- | --- |
+| `NEXT_PUBLIC_SUPABASE_URL` | Your Supabase project URL, e.g. `https://xxxx.supabase.co` — **no path after `.co`** | Yes (safe) |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | The publishable/anon key (`sb_publishable_...`) | Yes (safe, protected by Row Level Security) |
+| `SUPABASE_SERVICE_ROLE_KEY` | The secret key (`sb_secret_...`) | **No — server only. Never prefix with NEXT_PUBLIC.** |
+
+Both keys are in the Supabase dashboard under **Settings → API**.
+
+### Connecting the GitHub repo
+
+1. Go to [vercel.com](https://vercel.com) and sign up / log in — choose **Continue with GitHub** so the accounts are linked.
+2. Click **Add New… → Project**.
+3. Under "Import Git Repository", find **tour-activation-mvp** and click **Import**. (If it's not listed, click "Adjust GitHub App Permissions" and grant Vercel access to the repo.)
+4. Leave the defaults — Vercel auto-detects Next.js. Don't change the build command or output directory.
+5. Before clicking Deploy, open the **Environment Variables** section on that same screen and add the three variables from the checklist above.
+6. Click **Deploy** and wait a minute or two.
+7. You'll get a live URL like `tour-activation-mvp.vercel.app`. Test it: open `/c/your-campaign-slug` on your phone.
+
+From then on, every push to `main` on GitHub deploys automatically. Pull requests get their own preview URLs.
+
+### After the first deploy
+
+- Add a custom domain (optional): **Project Settings → Domains**.
+- Campaign links to share with fans look like: `https://your-domain/c/<slug>`.
