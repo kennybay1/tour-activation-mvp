@@ -80,6 +80,7 @@ Add these three in Vercel under **Project Settings → Environment Variables** (
 | `NEXT_PUBLIC_SUPABASE_URL` | Your Supabase project URL, e.g. `https://xxxx.supabase.co` — **no path after `.co`** | Yes (safe) |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | The publishable/anon key (`sb_publishable_...`) | Yes (safe, protected by Row Level Security) |
 | `SUPABASE_SERVICE_ROLE_KEY` | The secret key (`sb_secret_...`) | **No — server only. Never prefix with NEXT_PUBLIC.** |
+| `ADMIN_EMAIL` | The email of the single admin account (see "Admin area" below) | **No — server only.** |
 
 Both keys are in the Supabase dashboard under **Settings → API**.
 
@@ -99,3 +100,15 @@ From then on, every push to `main` on GitHub deploys automatically. Pull request
 
 - Add a custom domain (optional): **Project Settings → Domains**.
 - Campaign links to share with fans look like: `https://your-domain/c/<slug>`.
+
+## Admin area
+
+`/admin` is a password-protected area for the (single) site owner. There is deliberately no signup or password-reset flow.
+
+Setup, once:
+
+1. In the Supabase dashboard go to **Authentication → Users → Add user → Create new user**. Enter your email and a strong password, and tick **Auto Confirm User**.
+2. Set `ADMIN_EMAIL` to that exact email in `.env.local` (and in Vercel's environment variables for the live site).
+3. Recommended: in **Authentication → Sign In / Up**, disable public signups — nobody else should ever create an account.
+
+Sign in at `/admin/login`. Every admin page is checked on the server: a valid login session **and** an email match against `ADMIN_EMAIL`, otherwise you're redirected to the login page. Admin data is fetched with the service-role key on the server only — the browser-side (anon) client can only ever see the public campaign fields, never `discount_code` or `reward_content_url`.
