@@ -85,7 +85,7 @@ export async function POST(
   const { data: campaign, error: campaignError } = await db
     .from("campaigns")
     .select(
-      "id, lat, lng, radius_m, reward_content_url, discount_code, ticket_url, starts_at, ends_at, is_active"
+      "id, lat, lng, radius_m, reward_content_url, reward_storage_path, discount_code, ticket_url, starts_at, ends_at, is_active, status"
     )
     .eq("slug", slug)
     .maybeSingle();
@@ -96,6 +96,7 @@ export async function POST(
   const now = new Date();
   if (
     !campaign ||
+    campaign.status !== "live" ||
     !campaign.is_active ||
     now < new Date(campaign.starts_at) ||
     now > new Date(campaign.ends_at)
@@ -168,10 +169,20 @@ export async function POST(
     return NextResponse.json({ status: "out_of_range", distance_m: distanceM });
   }
 
+  // An uploaded reward lives in the private storage bucket; hand out a
+  // short-lived signed link instead of the public URL field.
+  let rewardContentUrl: string | null = campaign.reward_content_url;
+  if (campaign.reward_storage_path) {
+    const { data: signed } = await db.storage
+      .from("rewards")
+      .createSignedUrl(campaign.reward_storage_path, 60 * 60);
+    if (signed?.signedUrl) rewardContentUrl = signed.signedUrl;
+  }
+
   if (claim.unlocked) {
     return NextResponse.json({
       status: "already_claimed",
-      reward_content_url: campaign.reward_content_url,
+      reward_content_url: rewardContentUrl,
       discount_code: campaign.discount_code,
       ticket_url: campaign.ticket_url,
     });
@@ -199,7 +210,7 @@ export async function POST(
 
   return NextResponse.json({
     status: "unlocked",
-    reward_content_url: campaign.reward_content_url,
+    reward_content_url: rewardContentUrl,
     discount_code: campaign.discount_code,
     ticket_url: campaign.ticket_url,
   });

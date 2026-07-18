@@ -51,3 +51,19 @@ export async function requireAdmin(): Promise<User> {
   if (!user) redirect("/admin/login");
   return user;
 }
+
+// Any signed-in organiser (no approval required — approval gates
+// publishing, not building).
+export const getSessionUser = cache(async (): Promise<User | null> => {
+  const supabase = await supabaseServer();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  return user ?? null;
+});
+
+export async function requireUser(): Promise<User> {
+  const user = await getSessionUser();
+  if (!user) redirect("/login");
+  return user;
+}
