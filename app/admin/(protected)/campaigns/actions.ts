@@ -35,13 +35,21 @@ function toRow(input: CampaignInput) {
 
 export async function saveCampaign(
   input: CampaignInput,
-  id?: string
+  opts: { id?: string; ownerId?: string; status?: string } = {}
 ): Promise<SaveResult> {
+  const { id, ownerId, status } = opts;
   // Auth gate — every write is behind the admin check.
   const admin = await getAdminUser();
   if (!admin) return { ok: false, errors: { _form: "Not authorised." } };
 
   const errors = validateCampaign(input);
+
+  if (ownerId === undefined || ownerId === "") {
+    errors.owner_id = "Choose which account owns this campaign.";
+  }
+  if (status && !["draft", "live", "archived"].includes(status)) {
+    errors.status = "Invalid status.";
+  }
 
   // Slug uniqueness needs the database, so it lives here rather than in the
   // pure schema module.
@@ -61,7 +69,11 @@ export async function saveCampaign(
 
   if (Object.keys(errors).length > 0) return { ok: false, errors };
 
-  const row = toRow(input);
+  const row = {
+    ...toRow(input),
+    owner_id: ownerId,
+    ...(status ? { status } : {}),
+  };
 
   if (id) {
     const { error } = await supabaseAdmin()

@@ -71,14 +71,22 @@ export default function CampaignForm({
   initial,
   startsIso,
   endsIso,
+  owners = [],
+  defaultOwnerId,
+  initialStatus,
 }: {
   campaignId?: string;
   initial?: CampaignFormValues;
   startsIso?: string;
   endsIso?: string;
+  owners?: { id: string; label: string }[];
+  defaultOwnerId?: string;
+  initialStatus?: string;
 }) {
   const router = useRouter();
   const [values, setValues] = useState<CampaignFormValues>(initial ?? EMPTY);
+  const [ownerId, setOwnerId] = useState<string>(defaultOwnerId ?? "");
+  const [status, setStatus] = useState<string>(initialStatus ?? "draft");
 
   // Fill the date fields in local time after mount (edit case).
   useEffect(() => {
@@ -167,7 +175,11 @@ export default function CampaignForm({
       return;
     }
 
-    const res = await saveCampaign(payload, campaignId);
+    const res = await saveCampaign(payload, {
+      id: campaignId,
+      ownerId,
+      status,
+    });
     if (!res.ok) {
       setErrors(res.errors);
       setBusy(false);
@@ -184,6 +196,38 @@ export default function CampaignForm({
           {errors._form}
         </p>
       )}
+
+      <div className="grid grid-cols-2 gap-4">
+        <Field
+          label="Owner account"
+          error={errors.owner_id}
+          hint="Who this campaign belongs to — it appears in their dashboard."
+        >
+          <select
+            className={inputCls}
+            value={ownerId}
+            onChange={(e) => setOwnerId(e.target.value)}
+          >
+            <option value="">Choose an account…</option>
+            {owners.map((o) => (
+              <option key={o.id} value={o.id}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Status" error={errors.status}>
+          <select
+            className={inputCls}
+            value={status}
+            onChange={(e) => setStatus(e.target.value)}
+          >
+            <option value="draft">Draft</option>
+            <option value="live">Live</option>
+            <option value="archived">Archived</option>
+          </select>
+        </Field>
+      </div>
 
       <Field label="Artist name" error={errors.artist_name}>
         <input

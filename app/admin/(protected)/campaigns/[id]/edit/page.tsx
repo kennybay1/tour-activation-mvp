@@ -14,12 +14,14 @@ export default async function EditCampaignPage({
 }) {
   await requireAdmin();
   const { id } = await params;
+  const db = supabaseAdmin();
 
-  const { data: c, error } = await supabaseAdmin()
-    .from("campaigns")
-    .select("*")
-    .eq("id", id)
-    .maybeSingle();
+  const [{ data: c, error }, { data: profiles }, { data: usersData }] =
+    await Promise.all([
+      db.from("campaigns").select("*").eq("id", id).maybeSingle(),
+      db.from("profiles").select("id, org_name").order("created_at"),
+      db.auth.admin.listUsers(),
+    ]);
 
   if (error) {
     return (
@@ -27,6 +29,12 @@ export default async function EditCampaignPage({
     );
   }
   if (!c) notFound();
+
+  const emailById = new Map(usersData.users.map((u) => [u.id, u.email]));
+  const owners = (profiles ?? []).map((p) => ({
+    id: p.id,
+    label: p.org_name || emailById.get(p.id) || p.id.slice(0, 8),
+  }));
 
   const initial: CampaignFormValues = {
     slug: c.slug ?? "",
@@ -55,6 +63,9 @@ export default async function EditCampaignPage({
         initial={initial}
         startsIso={c.starts_at}
         endsIso={c.ends_at}
+        owners={owners}
+        defaultOwnerId={c.owner_id ?? undefined}
+        initialStatus={c.status}
       />
     </div>
   );

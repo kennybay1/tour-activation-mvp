@@ -4,6 +4,7 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { createServerClient } from "@supabase/ssr";
 import type { User } from "@supabase/supabase-js";
+import { supabaseAdmin } from "./supabase-admin";
 
 // Anon-key client that reads the auth session from request cookies.
 // Used only to identify the logged-in user — data access goes through
@@ -40,9 +41,18 @@ export const getAdminUser = cache(async (): Promise<User | null> => {
   const {
     data: { user },
   } = await supabase.auth.getUser();
+  // Belt and braces: the session's email must match ADMIN_EMAIL AND the
+  // profile must be flagged is_admin (checked with the service role, so
+  // no client-side state can influence it). Fails closed on both.
   const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase();
   if (!adminEmail) return null;
   if (!user?.email || user.email.toLowerCase() !== adminEmail) return null;
+  const { data: profile } = await supabaseAdmin()
+    .from("profiles")
+    .select("is_admin")
+    .eq("id", user.id)
+    .maybeSingle();
+  if (!profile?.is_admin) return null;
   return user;
 });
 
