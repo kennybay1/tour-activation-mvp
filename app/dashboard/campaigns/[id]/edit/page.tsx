@@ -55,6 +55,7 @@ export default async function EditCampaignPage({
         initial={initial}
         startsIso={c.starts_at}
         endsIso={c.ends_at}
+        storagePath={c.reward_storage_path}
       />
     </div>
   );

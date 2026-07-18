@@ -170,12 +170,13 @@ export async function POST(
   }
 
   // An uploaded reward lives in the private storage bucket; hand out a
-  // short-lived signed link instead of the public URL field.
+  // two-hour signed link instead of the raw path, which never leaves the
+  // server.
   let rewardContentUrl: string | null = campaign.reward_content_url;
   if (campaign.reward_storage_path) {
     const { data: signed } = await db.storage
       .from("rewards")
-      .createSignedUrl(campaign.reward_storage_path, 60 * 60);
+      .createSignedUrl(campaign.reward_storage_path, 60 * 60 * 2);
     if (signed?.signedUrl) rewardContentUrl = signed.signedUrl;
   }
 

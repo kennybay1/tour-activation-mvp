@@ -61,16 +61,29 @@ function isoToLocal(iso?: string): string {
   )}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+const MAX_FILE_BYTES = 50 * 1024 * 1024;
+const ALLOWED_FILE_RE = /\.(mp3|m4a|mp4|jpg|jpeg|png|webp)$/i;
+
+function sanitizeFilename(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9.]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
 export default function OrganiserCampaignForm({
   campaignId,
   initial,
   startsIso,
   endsIso,
+  storagePath: initialStoragePath,
 }: {
   campaignId?: string;
   initial?: OrganiserFormValues;
   startsIso?: string;
   endsIso?: string;
+  storagePath?: string | null;
 }) {
   const router = useRouter();
   const [values, setValues] = useState<OrganiserFormValues>(initial ?? EMPTY);
@@ -80,6 +93,37 @@ export default function OrganiserCampaignForm({
   >("idle");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
+  const [busyLabel, setBusyLabel] = useState("Saving…");
+  // Reward file: the saved path, a newly chosen (not yet uploaded) file,
+  // and the original path so replaced/removed files get deleted on save.
+  const [storagePath, setStoragePath] = useState<string | null>(
+    initialStoragePath ?? null
+  );
+  const [file, setFile] = useState<File | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const originalPath = initialStoragePath ?? null;
+
+  const onPickFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    e.target.value = "";
+    if (!f) return;
+    setFileError(null);
+    if (!ALLOWED_FILE_RE.test(f.name)) {
+      setFileError("Use MP3, M4A, MP4, JPG, PNG or WebP.");
+      return;
+    }
+    if (f.size > MAX_FILE_BYTES) {
+      setFileError("That file is over 50MB.");
+      return;
+    }
+    setFile(f);
+  };
+
+  const clearFile = () => {
+    setFile(null);
+    setFileError(null);
+    setStoragePath(null);
+  };
 
   useEffect(() => {
     if (!startsIso && !endsIso) return;
@@ -182,21 +226,80 @@ export default function OrganiserCampaignForm({
 
     // RLS: inserts must carry the signed-in user's id; updates only match
     // rows this user owns.
-    const { error } = campaignId
-      ? await supabase.from("campaigns").update(row).eq("id", campaignId)
-      : await supabase
-          .from("campaigns")
-          .insert({ ...row, owner_id: user.id });
-
-    if (error) {
-      setErrors(
-        error.code === "23505"
-          ? { slug: "That slug is already used by another campaign." }
-          : { _form: "Couldn't save. Try again." }
-      );
-      setBusy(false);
-      return;
+    let savedId = campaignId;
+    if (campaignId) {
+      const { error } = await supabase
+        .from("campaigns")
+        .update(row)
+        .eq("id", campaignId);
+      if (error) {
+        setErrors(
+          error.code === "23505"
+            ? { slug: "That slug is already used by another campaign." }
+            : { _form: "Couldn't save. Try again." }
+        );
+        setBusy(false);
+        return;
+      }
+    } else {
+      const { data, error } = await supabase
+        .from("campaigns")
+        .insert({ ...row, owner_id: user.id })
+        .select("id")
+        .single();
+      if (error || !data) {
+        setErrors(
+          error?.code === "23505"
+            ? { slug: "That slug is already used by another campaign." }
+            : { _form: "Couldn't save. Try again." }
+        );
+        setBusy(false);
+        return;
+      }
+      savedId = data.id;
     }
+
+    // Reward file changes. undefined = leave the stored path untouched.
+    let newPath: string | null | undefined = undefined;
+    if (file) {
+      newPath = `${user.id}/${savedId}/${sanitizeFilename(file.name)}`;
+    } else if (originalPath && !storagePath) {
+      newPath = null; // organiser pressed Remove
+    }
+
+    if (file && newPath) {
+      setBusyLabel("Uploading file…");
+      const { error: uploadError } = await supabase.storage
+        .from("rewards")
+        .upload(newPath, file, { upsert: true, contentType: file.type });
+      if (uploadError) {
+        setErrors({
+          _form:
+            "The campaign saved, but the file upload failed — try the upload again from Edit.",
+        });
+        setBusy(false);
+        setBusyLabel("Saving…");
+        return;
+      }
+    }
+
+    if (newPath !== undefined) {
+      const { error: pathError } = await supabase
+        .from("campaigns")
+        .update({ reward_storage_path: newPath })
+        .eq("id", savedId);
+      if (pathError) {
+        setErrors({ _form: "Couldn't attach the file. Try again." });
+        setBusy(false);
+        setBusyLabel("Saving…");
+        return;
+      }
+      // Tidy up a replaced or removed file; best-effort only.
+      if (originalPath && originalPath !== newPath) {
+        await supabase.storage.from("rewards").remove([originalPath]);
+      }
+    }
+
     router.push("/dashboard");
     router.refresh();
   }
@@ -340,9 +443,51 @@ export default function OrganiserCampaignForm({
       </Field>
 
       <Field
-        label="Reward content URL"
+        label="Reward file"
+        error={fileError ?? undefined}
+        hint="Audio (MP3, M4A), video (MP4) or image (JPG, PNG, WebP), up to 50MB. Stored privately — fans only ever get a temporary link, after unlocking."
+      >
+        {file || storagePath ? (
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-ink/25 px-4 py-3">
+            <span className="min-w-0 truncate font-mono text-xs text-ink/80">
+              {file ? `${file.name} — uploads when you save` : storagePath?.split("/").pop()}
+            </span>
+            <div className="flex shrink-0 gap-2">
+              <label className="cursor-pointer rounded-full border border-ink/30 px-3 py-1.5 text-xs font-medium text-ink/70 transition hover:border-ink/60">
+                Replace
+                <input
+                  type="file"
+                  accept=".mp3,.m4a,.mp4,.jpg,.jpeg,.png,.webp"
+                  className="hidden"
+                  onChange={onPickFile}
+                />
+              </label>
+              <button
+                type="button"
+                onClick={clearFile}
+                className="rounded-full border border-ink/30 px-3 py-1.5 text-xs font-medium text-ink/70 transition hover:border-ink/60"
+              >
+                Remove
+              </button>
+            </div>
+          </div>
+        ) : (
+          <label className="flex cursor-pointer items-center justify-center rounded-xl border border-dashed border-ink/35 px-4 py-6 text-sm font-medium text-ink/60 transition hover:border-ink/60">
+            Upload a file
+            <input
+              type="file"
+              accept=".mp3,.m4a,.mp4,.jpg,.jpeg,.png,.webp"
+              className="hidden"
+              onChange={onPickFile}
+            />
+          </label>
+        )}
+      </Field>
+
+      <Field
+        label="Or link to hosted content"
         error={errors.reward_content_url}
-        hint="Audio, video or image the fan unlocks. Optional."
+        hint="Used only if no file is uploaded above. Optional."
       >
         <input
           className={inputCls}
@@ -394,7 +539,7 @@ export default function OrganiserCampaignForm({
           disabled={busy}
           className="rounded-full bg-forest-deep px-7 py-3 font-semibold text-parchment transition active:scale-[0.98] disabled:opacity-50"
         >
-          {busy ? "Saving…" : campaignId ? "Save changes" : "Create draft"}
+          {busy ? busyLabel : campaignId ? "Save changes" : "Create draft"}
         </button>
         <button
           type="button"
