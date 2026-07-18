@@ -12,7 +12,7 @@ export default function SignOutButton() {
         router.push("/admin/login");
         router.refresh();
       }}
-      className="rounded-xl border border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-300 transition hover:border-zinc-500 active:scale-[0.98]"
+      className="rounded-full border border-ink/30 px-4 py-2 text-sm font-medium text-ink/80 transition hover:border-ink/60 active:scale-[0.98]"
     >
       Sign out
     </button>

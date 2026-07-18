@@ -28,15 +28,20 @@ export default function AdminLogin() {
     router.refresh();
   };
 
+  const inputCls =
+    "w-full rounded-xl border border-ink/30 bg-transparent px-4 py-3 text-ink placeholder-ink/30 outline-none focus:border-forest";
+
   return (
-    <div className="flex min-h-dvh items-center justify-center bg-zinc-950 px-5 text-zinc-100 antialiased">
-      <form onSubmit={onSubmit} className="w-full max-w-sm">
-        <h1 className="text-2xl font-bold tracking-tight">Admin sign in</h1>
-        <p className="mt-1 text-sm text-zinc-500">Tour Activation</p>
+    <div className="grain flex min-h-dvh items-center justify-center bg-cream px-5 font-sans text-ink">
+      <form onSubmit={onSubmit} className="fade-up w-full max-w-sm">
+        <p className="text-xs font-medium uppercase tracking-[0.3em] text-clay">
+          Tour Activation
+        </p>
+        <h1 className="mt-3 font-serif text-4xl">Admin sign in</h1>
 
         <label
           htmlFor="email"
-          className="mb-2 mt-8 block text-sm font-medium text-zinc-300"
+          className="mb-2 mt-8 block text-xs font-medium uppercase tracking-[0.2em] text-ink/60"
         >
           Email
         </label>
@@ -47,12 +52,12 @@ export default function AdminLogin() {
           autoComplete="email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
-          className="w-full rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-3 text-zinc-100 outline-none focus:border-fuchsia-500"
+          className={inputCls}
         />
 
         <label
           htmlFor="password"
-          className="mb-2 mt-4 block text-sm font-medium text-zinc-300"
+          className="mb-2 mt-4 block text-xs font-medium uppercase tracking-[0.2em] text-ink/60"
         >
           Password
         </label>
@@ -63,15 +68,15 @@ export default function AdminLogin() {
           autoComplete="current-password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          className="w-full rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-3 text-zinc-100 outline-none focus:border-fuchsia-500"
+          className={inputCls}
         />
 
-        {error && <p className="mt-4 text-sm text-red-400">{error}</p>}
+        {error && <p className="mt-4 text-sm font-medium text-clay">{error}</p>}
 
         <button
           type="submit"
           disabled={busy}
-          className="mt-6 w-full rounded-xl bg-zinc-50 py-3 font-semibold text-zinc-950 transition active:scale-[0.98] disabled:opacity-50"
+          className="mt-6 w-full rounded-full bg-forest-deep py-3.5 font-semibold text-parchment transition active:scale-[0.98] disabled:opacity-50"
         >
           {busy ? "Signing in…" : "Sign in"}
         </button>

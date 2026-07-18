@@ -180,7 +180,7 @@ export default function CampaignForm({
   return (
     <form onSubmit={onSubmit} className="space-y-6" noValidate>
       {errors._form && (
-        <p className="rounded-xl border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-300">
+        <p className="rounded-xl border border-clay/60 bg-clay/10 p-3 text-sm font-medium text-clay">
           {errors._form}
         </p>
       )}
@@ -233,13 +233,13 @@ export default function CampaignForm({
           placeholder="test-band-london"
         />
         {slugStatus === "checking" && (
-          <p className="mt-1 text-xs text-zinc-500">Checking availability…</p>
+          <p className="mt-1 text-xs text-ink/50">Checking availability…</p>
         )}
         {slugStatus === "available" && (
-          <p className="mt-1 text-xs text-emerald-400">✓ Available</p>
+          <p className="mt-1 text-xs font-medium text-forest">✓ Available</p>
         )}
         {slugStatus === "taken" && (
-          <p className="mt-1 text-xs text-red-400">
+          <p className="mt-1 text-xs font-medium text-clay">
             ✗ Already used by another campaign
           </p>
         )}
@@ -283,7 +283,7 @@ export default function CampaignForm({
           />
         </Field>
       </div>
-      <p className="-mt-3 text-xs text-zinc-500">
+      <p className="-mt-3 text-xs text-ink/50">
         Right-click the spot in Google Maps and copy the coordinates, then
         paste them here.
         {mapsPreview && (
@@ -293,7 +293,7 @@ export default function CampaignForm({
               href={mapsPreview}
               target="_blank"
               rel="noopener noreferrer"
-              className="font-medium text-fuchsia-400 underline underline-offset-4"
+              className="font-medium text-clay underline underline-offset-4"
             >
               Preview on Google Maps
             </a>
@@ -313,7 +313,7 @@ export default function CampaignForm({
           onChange={(e) => set("radius_m", e.target.value)}
         />
         {radiusLow && (
-          <p className="mt-1 text-xs text-amber-400">
+          <p className="mt-1 text-xs font-medium text-clay">
             Below {RADIUS_WARN_BELOW}m, everyday GPS wobble may block real fans
             who are actually there.
           </p>
@@ -379,12 +379,12 @@ export default function CampaignForm({
         </Field>
       </div>
 
-      <label className="flex items-center gap-3 text-sm text-zinc-300">
+      <label className="flex items-center gap-3 text-sm text-ink/80">
         <input
           type="checkbox"
           checked={values.is_active}
           onChange={(e) => set("is_active", e.target.checked)}
-          className="h-5 w-5 accent-fuchsia-500"
+          className="h-5 w-5 accent-forest"
         />
         Active (fans can access the page while it&apos;s within the dates above)
       </label>
@@ -393,14 +393,14 @@ export default function CampaignForm({
         <button
           type="submit"
           disabled={busy}
-          className="rounded-xl bg-zinc-50 px-6 py-3 font-semibold text-zinc-950 transition active:scale-[0.98] disabled:opacity-50"
+          className="rounded-full bg-forest-deep px-7 py-3 font-semibold text-parchment transition active:scale-[0.98] disabled:opacity-50"
         >
           {busy ? "Saving…" : campaignId ? "Save changes" : "Create campaign"}
         </button>
         <button
           type="button"
           onClick={() => router.push("/admin")}
-          className="rounded-xl border border-zinc-700 px-6 py-3 font-medium text-zinc-300 transition hover:border-zinc-500"
+          className="rounded-full border border-ink/30 px-7 py-3 font-medium text-ink/80 transition hover:border-ink/60"
         >
           Cancel
         </button>
@@ -410,7 +410,7 @@ export default function CampaignForm({
 }
 
 const inputCls =
-  "w-full rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-3 text-zinc-100 placeholder-zinc-600 outline-none focus:border-fuchsia-500";
+  "w-full rounded-xl border border-ink/30 bg-transparent px-4 py-3 text-ink placeholder-ink/30 outline-none focus:border-forest";
 
 function Field({
   label,
@@ -425,12 +425,12 @@ function Field({
 }) {
   return (
     <div>
-      <label className="mb-2 block text-sm font-medium text-zinc-300">
+      <label className="mb-2 block text-xs font-medium uppercase tracking-[0.15em] text-ink/60">
         {label}
       </label>
       {children}
-      {hint && !error && <p className="mt-1 text-xs text-zinc-500">{hint}</p>}
-      {error && <p className="mt-1 text-xs text-red-400">{error}</p>}
+      {hint && !error && <p className="mt-1 text-xs text-ink/50">{hint}</p>}
+      {error && <p className="mt-1 text-xs font-medium text-clay">{error}</p>}
     </div>
   );
 }

@@ -22,7 +22,9 @@ export default async function EditCampaignPage({
     .maybeSingle();
 
   if (error) {
-    return <p className="text-red-400">Couldn&apos;t load this campaign.</p>;
+    return (
+      <p className="font-medium text-clay">Couldn&apos;t load this campaign.</p>
+    );
   }
   if (!c) notFound();
 
@@ -45,9 +47,9 @@ export default async function EditCampaignPage({
   };
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold tracking-tight">Edit campaign</h1>
-      <p className="mt-1 mb-8 text-sm text-zinc-500">{c.title}</p>
+    <div className="fade-up max-w-2xl">
+      <h1 className="font-serif text-3xl">Edit campaign</h1>
+      <p className="mt-1 mb-8 text-sm text-ink/50">{c.title}</p>
       <CampaignForm
         campaignId={c.id}
         initial={initial}
