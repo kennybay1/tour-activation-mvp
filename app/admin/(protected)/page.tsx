@@ -99,12 +99,20 @@ export default async function AdminHome() {
                       </a>
                     </td>
                     <td className="px-4 py-3">
-                      <Link
-                        href={`/admin/campaigns/${c.id}/edit`}
-                        className="font-medium text-zinc-300 underline underline-offset-4 hover:text-zinc-100"
-                      >
-                        Edit
-                      </Link>
+                      <span className="flex gap-3">
+                        <Link
+                          href={`/admin/campaigns/${c.id}/results`}
+                          className="font-medium text-zinc-300 underline underline-offset-4 hover:text-zinc-100"
+                        >
+                          Results
+                        </Link>
+                        <Link
+                          href={`/admin/campaigns/${c.id}/edit`}
+                          className="font-medium text-zinc-300 underline underline-offset-4 hover:text-zinc-100"
+                        >
+                          Edit
+                        </Link>
+                      </span>
                     </td>
                   </tr>
                 );
