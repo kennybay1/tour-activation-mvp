@@ -1,7 +1,11 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
-export const metadata: Metadata = { title: "FAQ" };
+export const metadata: Metadata = {
+  title: "FAQ",
+  description:
+    "How Moments works: presence verification, geofence precision, fan privacy, what campaigns cost and how to start.",
+};
 
 // Single source of truth: renders the accordion AND generates the
 // FAQPage JSON-LD below.

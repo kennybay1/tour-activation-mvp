@@ -379,7 +379,16 @@ export default function FanPage({ slug }: { slug: string }) {
               />
               <span>
                 I agree to receive marketing from {campaign.artist_name} and
-                their team
+                their team (
+                <a
+                  href="/privacy"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline underline-offset-2 hover:text-ink"
+                >
+                  privacy
+                </a>
+                )
               </span>
             </label>
 

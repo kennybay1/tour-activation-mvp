@@ -1,4 +1,11 @@
+import type { Metadata } from "next";
 import Link from "next/link";
+
+export const metadata: Metadata = {
+  title: { absolute: "Moments — geo-fenced fan engagement for artist teams" },
+  description:
+    "First-party data from dropping exclusive content at real-world locations. Fans unlock it by being there — no app, just a link.",
+};
 
 const STEPS = [
   {

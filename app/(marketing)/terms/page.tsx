@@ -2,53 +2,44 @@ import type { Metadata } from "next";
 
 export const metadata: Metadata = { title: "Terms" };
 
+function Item({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="py-5">
+      <h3 className="font-serif text-xl">{label}</h3>
+      <p className="mt-2 leading-relaxed text-ink/70">{children}</p>
+    </div>
+  );
+}
+
 export default function TermsPage() {
   return (
     <div className="mx-auto w-full max-w-2xl px-5 py-16">
-      <h1 className="font-serif text-4xl">Terms</h1>
-      <p className="mt-2 text-sm text-ink/50">
-        The short version, last updated July 2026.
-      </p>
+      <h1 className="font-serif text-4xl">Terms of Service</h1>
 
-      <div className="mt-8 space-y-8 leading-relaxed text-ink/80">
-        <section>
-          <h2 className="font-serif text-2xl">The service</h2>
-          <p className="mt-2">
-            Moments lets organisers publish location-unlocked campaigns and
-            lets fans unlock them by being there. We provide it as-is while
-            in early access, and we may change or withdraw features as it
-            evolves.
-          </p>
-        </section>
-        <section>
-          <h2 className="font-serif text-2xl">Organiser responsibilities</h2>
-          <p className="mt-2">
-            You must have the rights to any content you upload, you must only
-            contact fans who consented, and you must not send fans anywhere
-            unsafe or unlawful. We can suspend campaigns or accounts that
-            break this.
-          </p>
-        </section>
-        <section>
-          <h2 className="font-serif text-2xl">Fans</h2>
-          <p className="mt-2">
-            Take care out there — drops are placed by organisers, not by us,
-            and you visit locations at your own judgement. Cross roads, not
-            fences.
-          </p>
-        </section>
-        <section>
-          <h2 className="font-serif text-2xl">Liability</h2>
-          <p className="mt-2">
-            To the fullest extent the law allows, Moments isn&apos;t liable
-            for indirect losses arising from use of the service. Nothing in
-            these terms limits liability that can&apos;t legally be limited.
-          </p>
-        </section>
-        <section>
-          <h2 className="font-serif text-2xl">Questions</h2>
-          <p className="mt-2">Email us via the Talk to us page.</p>
-        </section>
+      <h2 className="mt-10 text-xs font-medium uppercase tracking-[0.3em] text-clay">
+        Core Terms
+      </h2>
+      <div className="mt-2 divide-y divide-ink/15 border-y border-ink/25">
+        <Item label="Campaign Compliance">
+          Organizers are solely responsible for ensuring that physical drop
+          locations are safe, accessible, and compliant with local public
+          access laws.
+        </Item>
+        <Item label="Content Rights">
+          Organizers guarantee they hold all necessary copyrights and
+          licensing rights for any audio, video, or intellectual property
+          uploaded as a campaign reward.
+        </Item>
+        <Item label="Platform Security">
+          Attempting to reverse-engineer server-side verification systems or
+          bypass location parameters via automated exploits is strictly
+          prohibited.
+        </Item>
+        <Item label="Pilot Limitations">
+          During the pilot phase, services are provided on an
+          &ldquo;as-is&rdquo; basis while platform scaling and optimization
+          are finalized.
+        </Item>
       </div>
     </div>
   );

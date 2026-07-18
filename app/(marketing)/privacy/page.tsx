@@ -2,54 +2,63 @@ import type { Metadata } from "next";
 
 export const metadata: Metadata = { title: "Privacy" };
 
+function Item({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="py-5">
+      <h3 className="font-serif text-xl">{label}</h3>
+      <p className="mt-2 leading-relaxed text-ink/70">{children}</p>
+    </div>
+  );
+}
+
 export default function PrivacyPage() {
   return (
     <div className="mx-auto w-full max-w-2xl px-5 py-16">
       <h1 className="font-serif text-4xl">Privacy</h1>
-      <p className="mt-2 text-sm text-ink/50">
-        The plain-English version, last updated July 2026.
-      </p>
 
-      <div className="mt-8 space-y-8 leading-relaxed text-ink/80">
-        <section>
-          <h2 className="font-serif text-2xl">What we collect from fans</h2>
-          <p className="mt-2">
-            When you register for a drop we collect your email address and
-            whether you ticked the marketing consent box. If you consented,
-            your email is shared with the artist team running that drop —
-            that&apos;s the point of the box — and with no one else.
-          </p>
-        </section>
-        <section>
-          <h2 className="font-serif text-2xl">Location</h2>
-          <p className="mt-2">
-            Your location is checked once, in your browser, at the moment you
-            try to unlock — only to measure how far you are from the spot. We
-            store that distance in metres. We never store your coordinates,
-            and we can&apos;t track you.
-          </p>
-        </section>
-        <section>
-          <h2 className="font-serif text-2xl">What we collect from organisers</h2>
-          <p className="mt-2">
-            Your email, organisation name and contact name, used to run your
-            account and nothing else.
-          </p>
-        </section>
-        <section>
-          <h2 className="font-serif text-2xl">Where it lives</h2>
-          <p className="mt-2">
-            Data is stored with Supabase and the site is hosted on Vercel.
-            We keep it as long as the campaign owner keeps the campaign.
-          </p>
-        </section>
-        <section>
-          <h2 className="font-serif text-2xl">Your rights</h2>
-          <p className="mt-2">
-            Want your data corrected or deleted? Email us via the Talk to us
-            page and we&apos;ll sort it.
-          </p>
-        </section>
+      <h2 className="mt-10 text-xs font-medium uppercase tracking-[0.3em] text-clay">
+        For Fans
+      </h2>
+      <div className="mt-2 divide-y divide-ink/15 border-y border-ink/25">
+        <Item label="Data Collected">
+          Email address (optional marketing consent, never pre-ticked).
+        </Item>
+        <Item label="Location Data">
+          One-time browser-based location access used exclusively for a
+          server-side distance check. Moments does not store your exact
+          latitude or longitude coordinates.
+        </Item>
+        <Item label="Analytics">
+          We record distance metrics and pass/fail success rates. Funnel
+          events are logged under an anonymous, randomized session ID to
+          evaluate campaign performance without identifying individuals.
+        </Item>
+        <Item label="Rights">
+          Users can contact us at any time to request data access or
+          permanent deletion.
+        </Item>
+      </div>
+
+      <h2 className="mt-12 text-xs font-medium uppercase tracking-[0.3em] text-clay">
+        For Organizers
+      </h2>
+      <div className="mt-2 divide-y divide-ink/15 border-y border-ink/25">
+        <Item label="Account Information">
+          Name, organization, and email address collected at registration.
+        </Item>
+        <Item label="Authentication">
+          Essential session cookies are used strictly to maintain secure
+          login states.
+        </Item>
+        <Item label="Asset Management">
+          Uploaded campaign media (audio, video, links) is stored securely
+          and delivered to verified fans via private, expiring access links.
+        </Item>
+        <Item label="Third-Party Sub-processors">
+          Infrastructure data is limited strictly to secure cloud hosting and
+          database providers (Vercel and Supabase). No data is brokered or
+          sold to third-party ad networks.
+        </Item>
       </div>
     </div>
   );
