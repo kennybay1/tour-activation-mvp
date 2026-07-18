@@ -32,6 +32,10 @@
   --font-mono: var(--font-plex-mono);
 }
 
+html {
+  scroll-behavior: smooth;
+}
+
 body {
   background: var(--cream);
   color: var(--ink);
