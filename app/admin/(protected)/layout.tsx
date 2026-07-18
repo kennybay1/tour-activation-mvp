@@ -17,7 +17,7 @@ export default async function AdminLayout({
         <div className="mx-auto flex max-w-5xl items-center justify-between px-5 py-4">
           <div className="flex items-baseline gap-8">
             <div>
-              <p className="font-serif text-xl italic">Tour Activation</p>
+              <p className="font-serif text-xl italic">Moments</p>
               <p className="text-xs uppercase tracking-[0.2em] text-ink/50">
                 Platform admin — {user.email}
               </p>

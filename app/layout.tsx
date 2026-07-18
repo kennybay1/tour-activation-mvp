@@ -22,8 +22,19 @@ const plexMono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Tour Activation",
-  description: "Tour Activation MVP",
+  title: {
+    default: "Moments — geo-fenced fan engagement for artist teams",
+    template: "%s — Moments",
+  },
+  description:
+    "Drop rewards at real-world spots — voice notes, discounts, first listens — that fans unlock by being there. Geo-fenced fan engagement for artist teams.",
+  openGraph: {
+    title: "Moments — geo-fenced fan engagement for artist teams",
+    description:
+      "Drop rewards at real-world spots that fans unlock by being there.",
+    siteName: "Moments",
+    type: "website",
+  },
 };
 
 export default function RootLayout({

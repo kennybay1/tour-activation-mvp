@@ -58,7 +58,7 @@ export async function GET(req: NextRequest) {
   return new NextResponse(lines.join("\n") + "\n", {
     headers: {
       "Content-Type": "text/csv; charset=utf-8",
-      "Content-Disposition": `attachment; filename="tour-activation-leads.csv"`,
+      "Content-Disposition": `attachment; filename="moments-leads.csv"`,
     },
   });
 }

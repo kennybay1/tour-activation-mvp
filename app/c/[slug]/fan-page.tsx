@@ -569,6 +569,19 @@ export default function FanPage({ slug }: { slug: string }) {
             </p>
           </Center>
         )}
+
+        <p className="pt-8 text-center text-xs text-ink/40">
+          Powered by{" "}
+          <a
+            href="/"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-serif italic text-ink/60 underline-offset-4 hover:underline"
+          >
+            Moments
+          </a>{" "}
+          — Be there.
+        </p>
       </div>
     </div>
   );

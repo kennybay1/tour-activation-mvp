@@ -23,7 +23,7 @@ export default async function DashboardLayout({
       <header className="border-b border-ink/20">
         <div className="mx-auto flex max-w-4xl items-center justify-between px-5 py-4">
           <div>
-            <p className="font-serif text-xl italic">Tour Activation</p>
+            <p className="font-serif text-xl italic">Moments</p>
             <p className="text-xs uppercase tracking-[0.2em] text-ink/50">
               {profile?.org_name || user.email}
             </p>

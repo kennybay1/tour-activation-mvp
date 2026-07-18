@@ -35,7 +35,7 @@ export default function AdminLogin() {
     <div className="grain flex min-h-dvh items-center justify-center bg-cream px-5 font-sans text-ink">
       <form onSubmit={onSubmit} className="fade-up w-full max-w-sm">
         <p className="text-xs font-medium uppercase tracking-[0.3em] text-clay">
-          Tour Activation
+          Moments
         </p>
         <h1 className="mt-3 font-serif text-4xl">Admin sign in</h1>
 

@@ -1,4 +1,8 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Moments
+
+Geo-fenced fan engagement for artist teams. Drop rewards at real-world spots — fans unlock them by being there.
+
+Built with Next.js, Tailwind and Supabase; deployed on Vercel.
 
 ## Getting Started
 
