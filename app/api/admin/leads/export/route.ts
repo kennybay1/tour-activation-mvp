@@ -4,7 +4,7 @@ import { supabaseAdmin } from "@/lib/supabase-admin";
 
 function cell(v: unknown): string {
   if (v == null) return "";
-  const s = typeof v === "object" ? JSON.stringify(v) : String(v);
+  const s = String(v);
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
@@ -14,11 +14,10 @@ export async function GET(req: NextRequest) {
     return NextResponse.redirect(new URL("/admin/login", req.url));
   }
 
-  const db = supabaseAdmin();
-  const { data, error } = await db
-    .from("claims")
+  const { data, error } = await supabaseAdmin()
+    .from("leads")
     .select(
-      "email, marketing_consent, consent_at, unlocked, unlocked_at, ticket_clicked_at, created_at, campaigns(slug, title)"
+      "name, email, organisation, role, artist_context, message, source, created_at"
     )
     .order("created_at", { ascending: false });
   if (error) {
@@ -26,32 +25,19 @@ export async function GET(req: NextRequest) {
   }
 
   const headers = [
+    "name",
     "email",
-    "campaign_slug",
-    "campaign_title",
-    "marketing_consent",
-    "consent_at",
-    "unlocked",
-    "unlocked_at",
-    "ticket_clicked_at",
+    "organisation",
+    "role",
+    "artist_context",
+    "message",
+    "source",
     "created_at",
   ];
   const lines = [headers.join(",")];
-  for (const r of data as unknown as Array<
-    Record<string, unknown> & { campaigns: { slug: string; title: string } | null }
-  >) {
+  for (const r of data) {
     lines.push(
-      [
-        cell(r.email),
-        cell(r.campaigns?.slug),
-        cell(r.campaigns?.title),
-        cell(r.marketing_consent),
-        cell(r.consent_at),
-        cell(r.unlocked),
-        cell(r.unlocked_at),
-        cell(r.ticket_clicked_at),
-        cell(r.created_at),
-      ].join(",")
+      headers.map((h) => cell((r as Record<string, unknown>)[h])).join(",")
     );
   }
 
