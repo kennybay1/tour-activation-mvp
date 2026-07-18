@@ -81,6 +81,12 @@ export default async function DashboardHome() {
                     /c/{c.slug}
                   </a>
                   <Link
+                    href={`/dashboard/campaigns/${c.id}/results`}
+                    className="font-medium text-ink/70 underline underline-offset-4 hover:text-ink"
+                  >
+                    Results
+                  </Link>
+                  <Link
                     href={`/dashboard/campaigns/${c.id}/edit`}
                     className="font-medium text-ink/70 underline underline-offset-4 hover:text-ink"
                   >
