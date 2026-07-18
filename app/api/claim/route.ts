@@ -85,7 +85,7 @@ export async function POST(
   const { data: campaign, error: campaignError } = await db
     .from("campaigns")
     .select(
-      "id, lat, lng, radius_m, reward_content_url, reward_storage_path, discount_code, ticket_url, starts_at, ends_at, is_active, status"
+      "id, reward_content_url, reward_storage_path, discount_code, ticket_url, starts_at, ends_at, is_active, status"
     )
     .eq("slug", slug)
     .maybeSingle();
@@ -101,6 +101,18 @@ export async function POST(
     now < new Date(campaign.starts_at) ||
     now > new Date(campaign.ends_at)
   ) {
+    return NextResponse.json({ status: "expired" });
+  }
+
+  // A campaign can have many locations; a campaign with none can't unlock.
+  const { data: locations, error: locationsError } = await db
+    .from("campaign_locations")
+    .select("id, lat, lng, radius_m")
+    .eq("campaign_id", campaign.id);
+  if (locationsError) {
+    return NextResponse.json({ error: "server_error" }, { status: 500 });
+  }
+  if (!locations?.length) {
     return NextResponse.json({ status: "expired" });
   }
 
@@ -147,12 +159,21 @@ export async function POST(
   }
 
   // Raw lat/lng is used only for this computation and never stored.
-  const distanceM = Math.round(
-    haversineMeters(lat, lng, campaign.lat, campaign.lng)
-  );
+  // Nearest location wins — never first match — so overlapping geofences
+  // resolve to the one the fan is actually closest to.
+  let nearest = locations[0];
+  let nearestDistance = Infinity;
+  for (const loc of locations) {
+    const d = haversineMeters(lat, lng, loc.lat, loc.lng);
+    if (d < nearestDistance) {
+      nearestDistance = d;
+      nearest = loc;
+    }
+  }
+  const distanceM = Math.round(nearestDistance);
   const accuracyM = Math.round(accuracy);
   const effectiveRadius =
-    campaign.radius_m + Math.min(accuracyM, MAX_ACCURACY_GRACE_M);
+    nearest.radius_m + Math.min(accuracyM, MAX_ACCURACY_GRACE_M);
 
   if (distanceM > effectiveRadius) {
     await db
@@ -164,7 +185,7 @@ export async function POST(
       claim_id: claim.id,
       session_id: sessionId,
       event_type: "unlock_out_of_range",
-      metadata: { distance_m: distanceM },
+      metadata: { distance_m: distanceM, location_id: nearest.id },
     });
     return NextResponse.json({ status: "out_of_range", distance_m: distanceM });
   }
@@ -196,6 +217,7 @@ export async function POST(
       unlocked_at: now.toISOString(),
       distance_m: distanceM,
       location_accuracy_m: accuracyM,
+      unlocked_location_id: nearest.id,
     })
     .eq("id", claim.id);
   if (unlockError) {
@@ -206,7 +228,7 @@ export async function POST(
     claim_id: claim.id,
     session_id: sessionId,
     event_type: "unlock_success",
-    metadata: { distance_m: distanceM },
+    metadata: { distance_m: distanceM, location_id: nearest.id },
   });
 
   return NextResponse.json({

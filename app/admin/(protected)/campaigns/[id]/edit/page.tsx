@@ -16,12 +16,23 @@ export default async function EditCampaignPage({
   const { id } = await params;
   const db = supabaseAdmin();
 
-  const [{ data: c, error }, { data: profiles }, { data: usersData }] =
-    await Promise.all([
-      db.from("campaigns").select("*").eq("id", id).maybeSingle(),
-      db.from("profiles").select("id, org_name").order("created_at"),
-      db.auth.admin.listUsers(),
-    ]);
+  const [
+    { data: c, error },
+    { data: profiles },
+    { data: usersData },
+    { data: firstLoc },
+  ] = await Promise.all([
+    db.from("campaigns").select("*").eq("id", id).maybeSingle(),
+    db.from("profiles").select("id, org_name").order("created_at"),
+    db.auth.admin.listUsers(),
+    db
+      .from("campaign_locations")
+      .select("location_name, lat, lng, radius_m")
+      .eq("campaign_id", id)
+      .order("sort_order")
+      .limit(1)
+      .maybeSingle(),
+  ]);
 
   if (error) {
     return (
@@ -41,10 +52,10 @@ export default async function EditCampaignPage({
     artist_name: c.artist_name ?? "",
     title: c.title ?? "",
     description: c.description ?? "",
-    location_name: c.location_name ?? "",
-    lat: c.lat != null ? String(c.lat) : "",
-    lng: c.lng != null ? String(c.lng) : "",
-    radius_m: c.radius_m != null ? String(c.radius_m) : "",
+    location_name: firstLoc?.location_name ?? "",
+    lat: firstLoc?.lat != null ? String(firstLoc.lat) : "",
+    lng: firstLoc?.lng != null ? String(firstLoc.lng) : "",
+    radius_m: firstLoc?.radius_m != null ? String(firstLoc.radius_m) : "",
     reward_teaser: c.reward_teaser ?? "",
     reward_content_url: c.reward_content_url ?? "",
     discount_code: c.discount_code ?? "",

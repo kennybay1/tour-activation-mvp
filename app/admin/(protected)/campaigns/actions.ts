@@ -12,17 +12,14 @@ export type SaveResult =
   | { ok: true; id: string }
   | { ok: false; errors: Record<string, string> };
 
-// Shape a validated input into the exact DB columns.
+// Shape a validated input into the exact DB columns. Location fields go
+// to campaign_locations, never to the legacy campaign columns.
 function toRow(input: CampaignInput) {
   return {
     slug: input.slug.trim(),
     artist_name: input.artist_name.trim(),
     title: input.title.trim(),
     description: input.description.trim() || null,
-    location_name: input.location_name.trim(),
-    lat: Number(input.lat),
-    lng: Number(input.lng),
-    radius_m: Number(input.radius_m),
     reward_teaser: input.reward_teaser.trim() || null,
     reward_content_url: input.reward_content_url.trim() || null,
     discount_code: input.discount_code.trim() || null,
@@ -31,6 +28,31 @@ function toRow(input: CampaignInput) {
     ends_at: new Date(input.ends_at).toISOString(),
     is_active: input.is_active,
   };
+}
+
+// The admin form edits a single (primary) location; other locations a
+// campaign may have are left untouched.
+async function syncPrimaryLocation(campaignId: string, input: CampaignInput) {
+  const db = supabaseAdmin();
+  const loc = {
+    location_name: (input.location_name ?? "").trim(),
+    lat: Number(input.lat),
+    lng: Number(input.lng),
+    radius_m: Number(input.radius_m),
+  };
+  const { data: existing } = await db
+    .from("campaign_locations")
+    .select("id")
+    .eq("campaign_id", campaignId)
+    .order("sort_order")
+    .limit(1)
+    .maybeSingle();
+  const res = existing
+    ? await db.from("campaign_locations").update(loc).eq("id", existing.id)
+    : await db
+        .from("campaign_locations")
+        .insert({ ...loc, campaign_id: campaignId, sort_order: 0 });
+  return res.error ?? null;
 }
 
 export async function saveCampaign(
@@ -81,6 +103,10 @@ export async function saveCampaign(
       .update(row)
       .eq("id", id);
     if (error) return { ok: false, errors: { _form: "Couldn't save. Try again." } };
+    const locError = await syncPrimaryLocation(id, input);
+    if (locError) {
+      return { ok: false, errors: { _form: "Couldn't save the location. Try again." } };
+    }
     revalidatePath("/admin");
     revalidatePath(`/c/${row.slug}`);
     return { ok: true, id };
@@ -93,6 +119,10 @@ export async function saveCampaign(
     .single();
   if (error || !data) {
     return { ok: false, errors: { _form: "Couldn't create the campaign. Try again." } };
+  }
+  const locError = await syncPrimaryLocation(data.id, input);
+  if (locError) {
+    return { ok: false, errors: { _form: "Campaign created, but its location failed to save — edit it to retry." } };
   }
   revalidatePath("/admin");
   revalidatePath(`/c/${row.slug}`);

@@ -9,16 +9,23 @@ type Campaign = {
   artist_name: string;
   title: string;
   description: string | null;
-  location_name: string;
-  lat: number;
-  lng: number;
-  radius_m: number;
   reward_teaser: string | null;
   ticket_url: string;
   starts_at: string;
   ends_at: string;
   is_active: boolean;
 };
+
+type SpotLocation = {
+  id: string;
+  location_name: string;
+  lat: number;
+  lng: number;
+};
+
+function mapsUrlFor(loc: SpotLocation): string {
+  return `https://www.google.com/maps/search/?api=1&query=${loc.lat},${loc.lng}`;
+}
 
 type Reward = {
   reward_content_url: string | null;
@@ -70,6 +77,7 @@ function mediaKind(url: string): "audio" | "video" | "image" {
 export default function FanPage({ slug }: { slug: string }) {
   const [step, setStep] = useState<Step>("loading");
   const [campaign, setCampaign] = useState<Campaign | null>(null);
+  const [locations, setLocations] = useState<SpotLocation[]>([]);
   const [email, setEmail] = useState("");
   const [consent, setConsent] = useState(false);
   const [reward, setReward] = useState<Reward | null>(null);
@@ -105,16 +113,28 @@ export default function FanPage({ slug }: { slug: string }) {
       .select("*")
       .eq("slug", slug)
       .maybeSingle()
-      .then(({ data, error }) => {
+      .then(async ({ data, error }) => {
         if (cancelled) return;
         if (error || !data) {
           setStep("not_found");
           return;
         }
         const c = data as Campaign;
+        const { data: locs } = await supabase
+          .from("campaign_locations_public")
+          .select("id, location_name, lat, lng")
+          .eq("campaign_id", c.id)
+          .order("sort_order");
+        if (cancelled) return;
         setCampaign(c);
+        setLocations((locs as SpotLocation[]) ?? []);
         const now = new Date();
-        if (!c.is_active || now < new Date(c.starts_at) || now > new Date(c.ends_at)) {
+        if (
+          !c.is_active ||
+          now < new Date(c.starts_at) ||
+          now > new Date(c.ends_at) ||
+          !locs?.length
+        ) {
           setStep("expired");
         } else {
           setStep("landing");
@@ -212,10 +232,6 @@ export default function FanPage({ slug }: { slug: string }) {
     } catch {}
   };
 
-  const mapsUrl = campaign
-    ? `https://www.google.com/maps/search/?api=1&query=${campaign.lat},${campaign.lng}`
-    : "#";
-
   const inAppBanner = inApp && (
     <div className="rounded-xl border border-clay/60 bg-clay/10 p-4 text-sm">
       <p className="font-semibold text-clay">
@@ -297,19 +313,23 @@ export default function FanPage({ slug }: { slug: string }) {
 
             <div className="rounded-2xl border border-ink/25 p-5">
               <p className="text-xs font-medium uppercase tracking-[0.3em] text-ink/50">
-                The spot
+                {locations.length > 1 ? "The spots" : "The spot"}
               </p>
-              <p className="mt-2 text-lg font-medium">
-                {campaign.location_name}
-              </p>
-              <a
-                href={mapsUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="mt-2 inline-block text-sm font-medium text-clay underline underline-offset-4"
-              >
-                Open in Google Maps
-              </a>
+              <ul className="mt-2 space-y-4">
+                {locations.map((l) => (
+                  <li key={l.id}>
+                    <p className="text-lg font-medium">{l.location_name}</p>
+                    <a
+                      href={mapsUrlFor(l)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="mt-1 inline-block text-sm font-medium text-clay underline underline-offset-4"
+                    >
+                      Open in Google Maps
+                    </a>
+                  </li>
+                ))}
+              </ul>
             </div>
 
             <div className="divide-y divide-ink/15 border-y border-ink/25">
@@ -422,8 +442,11 @@ export default function FanPage({ slug }: { slug: string }) {
             </div>
             <p className="mt-4 font-serif text-2xl italic">Finding you…</p>
             <p className="mt-2 text-sm text-ink/60">
-              Checking you&apos;re at {campaign.location_name}. This can take a
-              few seconds.
+              Checking you&apos;re at{" "}
+              {locations.length > 1
+                ? "one of the spots"
+                : locations[0]?.location_name}
+              . This can take a few seconds.
             </p>
           </Center>
         )}
@@ -445,16 +468,37 @@ export default function FanPage({ slug }: { slug: string }) {
             </div>
             <h1 className="mt-4 font-serif text-3xl">Not quite there yet</h1>
             <p className="mt-2 text-ink/60">
-              The drop unlocks at {campaign.location_name}.
+              {locations.length > 1
+                ? "That's the distance to the nearest spot. The drop unlocks at any of these:"
+                : `The drop unlocks at ${locations[0]?.location_name}.`}
             </p>
-            <a
-              href={mapsUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mt-3 text-sm font-medium text-clay underline underline-offset-4"
-            >
-              Open in Google Maps
-            </a>
+            {locations.length > 1 ? (
+              <ul className="mt-3 space-y-1 text-sm">
+                {locations.map((l) => (
+                  <li key={l.id}>
+                    <a
+                      href={mapsUrlFor(l)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-medium text-clay underline underline-offset-4"
+                    >
+                      {l.location_name}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              locations[0] && (
+                <a
+                  href={mapsUrlFor(locations[0])}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-3 text-sm font-medium text-clay underline underline-offset-4"
+                >
+                  Open in Google Maps
+                </a>
+              )
+            )}
             <button onClick={runGeolocation} className={`mt-8 ${primaryBtn}`}>
               Try again
             </button>

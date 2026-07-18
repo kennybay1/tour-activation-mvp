@@ -16,11 +16,14 @@ export default async function EditCampaignPage({
 
   // Authenticated client — RLS returns nothing unless this user owns it.
   const supabase = await supabaseServer();
-  const { data: c, error } = await supabase
-    .from("campaigns")
-    .select("*")
-    .eq("id", id)
-    .maybeSingle();
+  const [{ data: c, error }, { data: locs }] = await Promise.all([
+    supabase.from("campaigns").select("*").eq("id", id).maybeSingle(),
+    supabase
+      .from("campaign_locations")
+      .select("id, location_name, lat, lng, radius_m")
+      .eq("campaign_id", id)
+      .order("sort_order"),
+  ]);
 
   if (error) {
     return (
@@ -34,10 +37,6 @@ export default async function EditCampaignPage({
     artist_name: c.artist_name ?? "",
     title: c.title ?? "",
     description: c.description ?? "",
-    location_name: c.location_name ?? "",
-    lat: c.lat != null ? String(c.lat) : "",
-    lng: c.lng != null ? String(c.lng) : "",
-    radius_m: c.radius_m != null ? String(c.radius_m) : "",
     reward_teaser: c.reward_teaser ?? "",
     reward_content_url: c.reward_content_url ?? "",
     discount_code: c.discount_code ?? "",
@@ -45,6 +44,14 @@ export default async function EditCampaignPage({
     startsLocal: "",
     endsLocal: "",
   };
+
+  const initialLocations = (locs ?? []).map((l) => ({
+    id: l.id,
+    location_name: l.location_name,
+    lat: String(l.lat),
+    lng: String(l.lng),
+    radius_m: String(l.radius_m),
+  }));
 
   return (
     <div className="fade-up max-w-2xl">
@@ -56,6 +63,7 @@ export default async function EditCampaignPage({
         startsIso={c.starts_at}
         endsIso={c.ends_at}
         storagePath={c.reward_storage_path}
+        initialLocations={initialLocations}
       />
     </div>
   );

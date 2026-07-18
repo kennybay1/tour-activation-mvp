@@ -1,14 +1,16 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import {
-  validateCampaign,
+  validateCampaignCore,
+  validateLocationRow,
   suggestSlug,
   DEFAULT_RADIUS_M,
   RADIUS_WARN_BELOW,
   type CampaignInput,
+  type LocationRowInput,
 } from "@/lib/campaign-schema";
 
 export type OrganiserFormValues = {
@@ -16,10 +18,6 @@ export type OrganiserFormValues = {
   artist_name: string;
   title: string;
   description: string;
-  location_name: string;
-  lat: string;
-  lng: string;
-  radius_m: string;
   reward_teaser: string;
   reward_content_url: string;
   discount_code: string;
@@ -33,16 +31,19 @@ const EMPTY: OrganiserFormValues = {
   artist_name: "",
   title: "",
   description: "",
-  location_name: "",
-  lat: "",
-  lng: "",
-  radius_m: String(DEFAULT_RADIUS_M),
   reward_teaser: "",
   reward_content_url: "",
   discount_code: "",
   ticket_url: "",
   startsLocal: "",
   endsLocal: "",
+};
+
+const EMPTY_LOCATION: LocationRowInput = {
+  location_name: "",
+  lat: "",
+  lng: "",
+  radius_m: String(DEFAULT_RADIUS_M),
 };
 
 function localToIso(local: string): string {
@@ -78,15 +79,31 @@ export default function OrganiserCampaignForm({
   startsIso,
   endsIso,
   storagePath: initialStoragePath,
+  initialLocations,
 }: {
   campaignId?: string;
   initial?: OrganiserFormValues;
   startsIso?: string;
   endsIso?: string;
   storagePath?: string | null;
+  initialLocations?: LocationRowInput[];
 }) {
   const router = useRouter();
   const [values, setValues] = useState<OrganiserFormValues>(initial ?? EMPTY);
+  const [locRows, setLocRows] = useState<LocationRowInput[]>(
+    initialLocations?.length ? initialLocations : [{ ...EMPTY_LOCATION }]
+  );
+
+  const setLoc = (i: number, key: keyof LocationRowInput, value: string) =>
+    setLocRows((rows) =>
+      rows.map((r, idx) => (idx === i ? { ...r, [key]: value } : r))
+    );
+  const addLoc = () =>
+    setLocRows((rows) => [...rows, { ...EMPTY_LOCATION }]);
+  const removeLoc = (i: number) =>
+    setLocRows((rows) =>
+      rows.length > 1 ? rows.filter((_, idx) => idx !== i) : rows
+    );
   const [slugTouched, setSlugTouched] = useState(Boolean(campaignId));
   const [slugStatus, setSlugStatus] = useState<
     "idle" | "checking" | "available" | "taken"
@@ -145,23 +162,23 @@ export default function OrganiserCampaignForm({
     setValues((v) => ({ ...v, slug: suggestSlug(v.artist_name, "") }));
   }, [values.artist_name, slugTouched, campaignId]);
 
-  const mapsPreview = useMemo(() => {
-    const lat = Number(values.lat);
-    const lng = Number(values.lng);
+  const rowMapsPreview = (r: LocationRowInput): string | null => {
+    const lat = Number(r.lat);
+    const lng = Number(r.lng);
     if (
-      values.lat.trim() === "" ||
-      values.lng.trim() === "" ||
+      r.lat.trim() === "" ||
+      r.lng.trim() === "" ||
       Number.isNaN(lat) ||
       Number.isNaN(lng)
     )
       return null;
     return `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
-  }, [values.lat, values.lng]);
+  };
 
-  const radiusLow =
-    values.radius_m.trim() !== "" &&
-    Number(values.radius_m) > 0 &&
-    Number(values.radius_m) < RADIUS_WARN_BELOW;
+  const rowRadiusLow = (r: LocationRowInput): boolean =>
+    r.radius_m.trim() !== "" &&
+    Number(r.radius_m) > 0 &&
+    Number(r.radius_m) < RADIUS_WARN_BELOW;
 
   // Best-effort availability check: own campaigns (RLS) + live public ones.
   // The database's unique constraint is the real enforcement on save.
@@ -192,7 +209,12 @@ export default function OrganiserCampaignForm({
       ends_at: localToIso(values.endsLocal),
       is_active: true,
     };
-    const clientErrors = validateCampaign(payload);
+    const clientErrors = validateCampaignCore(payload);
+    locRows.forEach((r, i) => {
+      for (const [k, v] of Object.entries(validateLocationRow(r))) {
+        clientErrors[`loc_${i}_${k}`] = v;
+      }
+    });
     if (Object.keys(clientErrors).length > 0) {
       setErrors(clientErrors);
       setBusy(false);
@@ -207,15 +229,13 @@ export default function OrganiserCampaignForm({
       return;
     }
 
+    // Locations live in campaign_locations now — the legacy campaign
+    // columns are left untouched.
     const row = {
       slug: values.slug.trim(),
       artist_name: values.artist_name.trim(),
       title: values.title.trim(),
       description: values.description.trim() || null,
-      location_name: values.location_name.trim(),
-      lat: Number(values.lat),
-      lng: Number(values.lng),
-      radius_m: Number(values.radius_m),
       reward_teaser: values.reward_teaser.trim() || null,
       reward_content_url: values.reward_content_url.trim() || null,
       discount_code: values.discount_code.trim() || null,
@@ -257,6 +277,54 @@ export default function OrganiserCampaignForm({
         return;
       }
       savedId = data.id;
+    }
+
+    // Sync the locations list — update kept rows, insert new ones, delete
+    // removed ones. RLS scopes every statement to this owner.
+    const { data: existingLocs } = await supabase
+      .from("campaign_locations")
+      .select("id")
+      .eq("campaign_id", savedId);
+    const keepIds = new Set(locRows.map((r) => r.id).filter(Boolean));
+    const toDelete = (existingLocs ?? [])
+      .map((l) => l.id)
+      .filter((id) => !keepIds.has(id));
+    if (toDelete.length) {
+      const { error: delError } = await supabase
+        .from("campaign_locations")
+        .delete()
+        .in("id", toDelete);
+      if (delError) {
+        setErrors({
+          _form:
+            "Couldn't remove a location — fans have already unlocked there, so it has history attached. Add it back, or archive the campaign instead.",
+        });
+        setBusy(false);
+        return;
+      }
+    }
+    for (let i = 0; i < locRows.length; i++) {
+      const r = locRows[i];
+      const locData = {
+        location_name: r.location_name.trim(),
+        lat: Number(r.lat),
+        lng: Number(r.lng),
+        radius_m: Number(r.radius_m),
+        sort_order: i,
+      };
+      const res = r.id
+        ? await supabase
+            .from("campaign_locations")
+            .update(locData)
+            .eq("id", r.id)
+        : await supabase
+            .from("campaign_locations")
+            .insert({ ...locData, campaign_id: savedId });
+      if (res.error) {
+        setErrors({ _form: "Couldn't save the locations. Try again." });
+        setBusy(false);
+        return;
+      }
     }
 
     // Reward file changes. undefined = leave the stored path untouched.
@@ -367,71 +435,113 @@ export default function OrganiserCampaignForm({
         />
       </Field>
 
-      <Field label="Location name" error={errors.location_name}>
-        <input
-          className={inputCls}
-          value={values.location_name}
-          onChange={(e) => set("location_name", e.target.value)}
-          placeholder="Outside the Roundhouse, Chalk Farm Rd"
-        />
-      </Field>
-
-      <div className="grid grid-cols-2 gap-4">
-        <Field label="Latitude" error={errors.lat}>
-          <input
-            className={inputCls}
-            inputMode="decimal"
-            value={values.lat}
-            onChange={(e) => set("lat", e.target.value)}
-            placeholder="51.5432"
-          />
-        </Field>
-        <Field label="Longitude" error={errors.lng}>
-          <input
-            className={inputCls}
-            inputMode="decimal"
-            value={values.lng}
-            onChange={(e) => set("lng", e.target.value)}
-            placeholder="-0.1519"
-          />
-        </Field>
+      <div>
+        <p className="mb-2 block text-xs font-medium uppercase tracking-[0.15em] text-ink/60">
+          Locations
+        </p>
+        <p className="mb-3 text-xs text-ink/50">
+          Fans can unlock at any of these — the nearest one counts.
+          Right-click each spot in Google Maps and copy the coordinates.
+        </p>
+        <div className="space-y-4">
+          {locRows.map((r, i) => {
+            const preview = rowMapsPreview(r);
+            return (
+              <div
+                key={r.id ?? `new-${i}`}
+                className="rounded-2xl border border-ink/25 p-4"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <span className="font-mono text-xs text-clay">
+                    {String(i + 1).padStart(2, "0")}
+                  </span>
+                  {locRows.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => removeLoc(i)}
+                      className="rounded-full border border-ink/30 px-3 py-1 text-xs font-medium text-ink/60 transition hover:border-ink/60"
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+                <div className="mt-3 space-y-4">
+                  <Field
+                    label="Location name"
+                    error={errors[`loc_${i}_location_name`]}
+                  >
+                    <input
+                      className={inputCls}
+                      value={r.location_name}
+                      onChange={(e) =>
+                        setLoc(i, "location_name", e.target.value)
+                      }
+                      placeholder="Outside the Roundhouse, Chalk Farm Rd"
+                    />
+                  </Field>
+                  <div className="grid grid-cols-2 gap-4">
+                    <Field label="Latitude" error={errors[`loc_${i}_lat`]}>
+                      <input
+                        className={inputCls}
+                        inputMode="decimal"
+                        value={r.lat}
+                        onChange={(e) => setLoc(i, "lat", e.target.value)}
+                        placeholder="51.5432"
+                      />
+                    </Field>
+                    <Field label="Longitude" error={errors[`loc_${i}_lng`]}>
+                      <input
+                        className={inputCls}
+                        inputMode="decimal"
+                        value={r.lng}
+                        onChange={(e) => setLoc(i, "lng", e.target.value)}
+                        placeholder="-0.1519"
+                      />
+                    </Field>
+                  </div>
+                  {preview && (
+                    <p className="-mt-2 text-xs">
+                      <a
+                        href={preview}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-medium text-clay underline underline-offset-4"
+                      >
+                        Preview on Google Maps
+                      </a>
+                    </p>
+                  )}
+                  <Field
+                    label="Unlock radius (metres)"
+                    error={errors[`loc_${i}_radius_m`]}
+                    hint="How close a fan must be to unlock. Default 200."
+                  >
+                    <input
+                      className={inputCls}
+                      inputMode="numeric"
+                      value={r.radius_m}
+                      onChange={(e) => setLoc(i, "radius_m", e.target.value)}
+                    />
+                    {rowRadiusLow(r) && (
+                      <p className="mt-1 text-xs font-medium text-clay">
+                        Below {RADIUS_WARN_BELOW}m, everyday GPS wobble may
+                        block real fans who are actually there.
+                      </p>
+                    )}
+                  </Field>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <button
+          type="button"
+          onClick={addLoc}
+          className="mt-3 rounded-full border border-ink/30 px-5 py-2 text-sm font-medium text-ink/70 transition hover:border-ink/60"
+        >
+          + Add location
+        </button>
       </div>
-      <p className="-mt-3 text-xs text-ink/50">
-        Right-click the spot in Google Maps and copy the coordinates, then
-        paste them here.
-        {mapsPreview && (
-          <>
-            {" "}
-            <a
-              href={mapsPreview}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="font-medium text-clay underline underline-offset-4"
-            >
-              Preview on Google Maps
-            </a>
-          </>
-        )}
-      </p>
-
-      <Field
-        label="Unlock radius (metres)"
-        error={errors.radius_m}
-        hint="How close a fan must be to unlock. Default 200."
-      >
-        <input
-          className={inputCls}
-          inputMode="numeric"
-          value={values.radius_m}
-          onChange={(e) => set("radius_m", e.target.value)}
-        />
-        {radiusLow && (
-          <p className="mt-1 text-xs font-medium text-clay">
-            Below {RADIUS_WARN_BELOW}m, everyday GPS wobble may block real fans
-            who are actually there.
-          </p>
-        )}
-      </Field>
 
       <Field label="Reward teaser" error={errors.reward_teaser}>
         <input
