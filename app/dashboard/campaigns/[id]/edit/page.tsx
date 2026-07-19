@@ -78,6 +78,7 @@ export default async function EditCampaignPage({
         storagePath={c.reward_storage_path}
         backgroundPath={c.background_image_path}
         initialLocations={initialLocations}
+        status={c.status}
       />
     </div>
   );

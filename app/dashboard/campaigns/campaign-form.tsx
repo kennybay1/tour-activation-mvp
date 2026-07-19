@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
@@ -165,6 +165,7 @@ export default function OrganiserCampaignForm({
   storagePath: initialStoragePath,
   backgroundPath: initialBackgroundPath,
   initialLocations,
+  status,
 }: {
   campaignId?: string;
   initial?: OrganiserFormValues;
@@ -173,6 +174,9 @@ export default function OrganiserCampaignForm({
   storagePath?: string | null;
   backgroundPath?: string | null;
   initialLocations?: BuilderLocation[];
+  // Campaign status when editing — autosave only ever runs for drafts, so
+  // half-typed edits can never reach a live fan page.
+  status?: string;
 }) {
   const router = useRouter();
   const [values, setValues] = useState<OrganiserFormValues>(initial ?? EMPTY);
@@ -194,12 +198,49 @@ export default function OrganiserCampaignForm({
   );
   const [file, setFile] = useState<File | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
-  const originalPath = initialStoragePath ?? null;
+
+  // The id this form is writing to — starts as the prop, but a new
+  // campaign gets one on its first (auto)save and keeps editing in place.
+  const [savedId, setSavedId] = useState<string | undefined>(campaignId);
+  const savedIdRef = useRef(savedId);
+  savedIdRef.current = savedId;
+  // What's actually in storage right now — updated after every successful
+  // save so repeat saves neither re-upload nor re-delete.
+  const savedRewardPathRef = useRef<string | null>(initialStoragePath ?? null);
+  const savedBgPathRef = useRef<string | null>(initialBackgroundPath ?? null);
+
+  // Autosave bookkeeping. Drafts only — see the `status` prop.
+  const isDraft = !campaignId || status === "draft";
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">(
+    "idle"
+  );
+  const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
+  const persistInFlightRef = useRef(false);
+  const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const persistRef = useRef<(opts: { navigate: boolean; silent: boolean }) => Promise<boolean>>(
+    async () => false
+  );
 
   // Every user edit flags unsaved changes; header/back/cancel navigation
-  // then prompts before discarding them. Cleared on successful save.
+  // then prompts before discarding them. Cleared on successful save. For
+  // drafts, an edit also schedules a silent autosave a few seconds out.
   const guard = useUnsavedChanges();
-  const markDirty = () => guard?.setDirty(true);
+  const isDraftRef = useRef(isDraft);
+  isDraftRef.current = isDraft;
+  const markDirty = () => {
+    guard?.setDirty(true);
+    if (!isDraftRef.current) return;
+    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    autosaveTimerRef.current = setTimeout(() => {
+      persistRef.current({ navigate: false, silent: true });
+    }, 3000);
+  };
+  useEffect(
+    () => () => {
+      if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    },
+    []
+  );
 
   const onPickFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
@@ -239,7 +280,6 @@ export default function OrganiserCampaignForm({
   const [bgPreviewUrl, setBgPreviewUrl] = useState<string | null>(null);
   const [bgError, setBgError] = useState<string | null>(null);
   const [bgProcessing, setBgProcessing] = useState(false);
-  const originalBgPath = initialBackgroundPath ?? null;
 
   const bgPublicUrl = (path: string) =>
     `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/backgrounds/${path}`;
@@ -324,15 +364,27 @@ export default function OrganiserCampaignForm({
       supabase.from("campaigns").select("id").eq("slug", s).maybeSingle(),
       supabase.from("campaigns_public").select("id").eq("slug", s).maybeSingle(),
     ]);
+    // Compare against savedId (not the prop) — a just-autosaved new draft
+    // owns its slug and mustn't be told it's taken by itself.
+    const own = savedIdRef.current;
     const taken =
-      (mine.data && mine.data.id !== campaignId) ||
-      (pub.data && pub.data.id !== campaignId);
+      (mine.data && mine.data.id !== own) || (pub.data && pub.data.id !== own);
     setSlugStatus(taken ? "taken" : "available");
   }
 
-  async function onSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setBusy(true);
+  // The single save pipeline behind everything: the primary submit
+  // (navigates back to the dashboard), the in-place Save button, and the
+  // debounced draft autosave (silent — skips quietly while the form is
+  // still incomplete rather than nagging mid-typing).
+  async function persist({
+    navigate,
+    silent,
+  }: {
+    navigate: boolean;
+    silent: boolean;
+  }): Promise<boolean> {
+    if (persistInFlightRef.current) return false;
+    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
 
     const payload: CampaignInput = {
       ...values,
@@ -343,217 +395,276 @@ export default function OrganiserCampaignForm({
     const clientErrors = validateCampaignCore(payload);
     const { formError, rowErrors } = validateLocations(locations);
     if (formError) clientErrors._form = formError;
-    setLocErrors(rowErrors);
     if (Object.keys(clientErrors).length > 0) {
-      setErrors(clientErrors);
-      setBusy(false);
-      return;
-    }
-
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) {
-      router.push("/login");
-      return;
-    }
-
-    // Locations live in campaign_locations now — the legacy campaign
-    // columns are left untouched.
-    const row = {
-      slug: values.slug.trim(),
-      artist_name: values.artist_name.trim(),
-      title: values.title.trim(),
-      description: values.description.trim() || null,
-      reward_teaser: values.reward_teaser.trim() || null,
-      reward_content_url: values.reward_content_url.trim() || null,
-      discount_code: values.discount_code.trim() || null,
-      ticket_url: values.ticket_url.trim() || null,
-      starts_at: payload.starts_at,
-      ends_at: payload.ends_at,
-      expired_headline: values.expired_headline.trim() || null,
-      expired_message: values.expired_message.trim() || null,
-      expired_link_url: values.expired_link_url.trim() || null,
-      expired_link_label: values.expired_link_label.trim() || null,
-    };
-
-    // RLS: inserts must carry the signed-in user's id; updates only match
-    // rows this user owns.
-    let savedId = campaignId;
-    if (campaignId) {
-      const { error } = await supabase
-        .from("campaigns")
-        .update(row)
-        .eq("id", campaignId);
-      if (error) {
-        setErrors(
-          error.code === "23505"
-            ? { slug: "That slug is already used by another campaign." }
-            : { _form: "Couldn't save. Try again." }
-        );
-        setBusy(false);
-        return;
+      if (!silent) {
+        setLocErrors(rowErrors);
+        setErrors(clientErrors);
       }
-    } else {
-      const { data, error } = await supabase
-        .from("campaigns")
-        .insert({ ...row, owner_id: user.id })
-        .select("id")
-        .single();
-      if (error || !data) {
-        setErrors(
-          error?.code === "23505"
-            ? { slug: "That slug is already used by another campaign." }
-            : { _form: "Couldn't save. Try again." }
-        );
-        setBusy(false);
-        return;
-      }
-      savedId = data.id;
+      return false;
+    }
+    if (!silent) {
+      setLocErrors({});
+      setErrors({});
     }
 
-    // Sync the locations list — update kept rows, insert new ones, delete
-    // removed ones. RLS scopes every statement to this owner. Locations
-    // are only written here, on save — not on every marker drag.
-    const { data: existingLocs } = await supabase
-      .from("campaign_locations")
-      .select("id")
-      .eq("campaign_id", savedId);
-    const keepIds = new Set(locations.map((l) => l.id).filter(Boolean));
-    const toDelete = (existingLocs ?? [])
-      .map((l) => l.id)
-      .filter((id) => !keepIds.has(id));
-    if (toDelete.length) {
-      const { error: delError } = await supabase
-        .from("campaign_locations")
-        .delete()
-        .in("id", toDelete);
-      if (delError) {
-        setErrors({
-          _form:
-            "Couldn't remove a location — fans have already unlocked there, so it has history attached. Add it back, or archive the campaign instead.",
-        });
-        setBusy(false);
-        return;
+    persistInFlightRef.current = true;
+    if (!silent) setBusy(true);
+    setSaveState("saving");
+    try {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) {
+        router.push("/login");
+        return false;
       }
-    }
-    for (let i = 0; i < locations.length; i++) {
-      const l = locations[i];
-      const locData = {
-        location_name: l.location_name.trim(),
-        lat: l.lat,
-        lng: l.lng,
-        radius_m: l.radius_m,
-        sort_order: i,
-        source: l.source,
-        external_ref: l.external_ref ?? null,
+
+      // Locations live in campaign_locations now — the legacy campaign
+      // columns are left untouched.
+      const row = {
+        slug: values.slug.trim(),
+        artist_name: values.artist_name.trim(),
+        title: values.title.trim(),
+        description: values.description.trim() || null,
+        reward_teaser: values.reward_teaser.trim() || null,
+        reward_content_url: values.reward_content_url.trim() || null,
+        discount_code: values.discount_code.trim() || null,
+        ticket_url: values.ticket_url.trim() || null,
+        starts_at: payload.starts_at,
+        ends_at: payload.ends_at,
+        expired_headline: values.expired_headline.trim() || null,
+        expired_message: values.expired_message.trim() || null,
+        expired_link_url: values.expired_link_url.trim() || null,
+        expired_link_label: values.expired_link_label.trim() || null,
       };
-      const res = l.id
-        ? await supabase
+
+      // RLS: inserts must carry the signed-in user's id; updates only
+      // match rows this user owns.
+      let id = savedIdRef.current;
+      if (id) {
+        const { error } = await supabase
+          .from("campaigns")
+          .update(row)
+          .eq("id", id);
+        if (error) {
+          if (!silent) {
+            setErrors(
+              error.code === "23505"
+                ? { slug: "That slug is already used by another campaign." }
+                : { _form: "Couldn't save. Try again." }
+            );
+          }
+          setSaveState("error");
+          return false;
+        }
+      } else {
+        const { data, error } = await supabase
+          .from("campaigns")
+          .insert({ ...row, owner_id: user.id })
+          .select("id")
+          .single();
+        if (error || !data) {
+          if (!silent) {
+            setErrors(
+              error?.code === "23505"
+                ? { slug: "That slug is already used by another campaign." }
+                : { _form: "Couldn't save. Try again." }
+            );
+          }
+          setSaveState("error");
+          return false;
+        }
+        id = data.id;
+        setSavedId(id);
+        // The slug is now taken by this very draft — stop auto-suggesting
+        // over it, and make the URL survive a refresh without remounting
+        // the form mid-edit.
+        setSlugTouched(true);
+        window.history.replaceState(null, "", `/dashboard/campaigns/${id}/edit`);
+      }
+
+      // Sync the locations list — update kept rows, insert new ones,
+      // delete removed ones. RLS scopes every statement to this owner.
+      const { data: existingLocs } = await supabase
+        .from("campaign_locations")
+        .select("id")
+        .eq("campaign_id", id);
+      const keepIds = new Set(locations.map((l) => l.id).filter(Boolean));
+      const toDelete = (existingLocs ?? [])
+        .map((l) => l.id)
+        .filter((locId) => !keepIds.has(locId));
+      if (toDelete.length) {
+        const { error: delError } = await supabase
+          .from("campaign_locations")
+          .delete()
+          .in("id", toDelete);
+        if (delError) {
+          if (!silent) {
+            setErrors({
+              _form:
+                "Couldn't remove a location — fans have already unlocked there, so it has history attached. Add it back, or archive the campaign instead.",
+            });
+          }
+          setSaveState("error");
+          return false;
+        }
+      }
+      // Newly inserted rows report their ids back into state, so the next
+      // save updates them in place instead of delete-and-reinserting.
+      const insertedIds: Record<string, string> = {};
+      for (let i = 0; i < locations.length; i++) {
+        const l = locations[i];
+        const locData = {
+          location_name: l.location_name.trim(),
+          lat: l.lat,
+          lng: l.lng,
+          radius_m: l.radius_m,
+          sort_order: i,
+          source: l.source,
+          external_ref: l.external_ref ?? null,
+        };
+        if (l.id) {
+          const res = await supabase
             .from("campaign_locations")
             .update(locData)
-            .eq("id", l.id)
-        : await supabase
+            .eq("id", l.id);
+          if (res.error) {
+            if (!silent) setErrors({ _form: "Couldn't save the locations. Try again." });
+            setSaveState("error");
+            return false;
+          }
+        } else {
+          const res = await supabase
             .from("campaign_locations")
-            .insert({ ...locData, campaign_id: savedId });
-      if (res.error) {
-        setErrors({ _form: "Couldn't save the locations. Try again." });
-        setBusy(false);
-        return;
+            .insert({ ...locData, campaign_id: id })
+            .select("id")
+            .single();
+          if (res.error || !res.data) {
+            if (!silent) setErrors({ _form: "Couldn't save the locations. Try again." });
+            setSaveState("error");
+            return false;
+          }
+          insertedIds[l.tempId] = res.data.id;
+        }
       }
-    }
+      if (Object.keys(insertedIds).length) {
+        setLocations((prev) =>
+          prev.map((l) =>
+            insertedIds[l.tempId] ? { ...l, id: insertedIds[l.tempId] } : l
+          )
+        );
+      }
 
-    // Reward file changes. undefined = leave the stored path untouched.
-    let newPath: string | null | undefined = undefined;
-    if (file) {
-      newPath = `${user.id}/${savedId}/${sanitizeFilename(file.name)}`;
-    } else if (originalPath && !storagePath) {
-      newPath = null; // organiser pressed Remove
-    }
+      // Reward file changes. undefined = leave the stored path untouched.
+      let newPath: string | null | undefined = undefined;
+      if (file) {
+        newPath = `${user.id}/${id}/${sanitizeFilename(file.name)}`;
+      } else if (savedRewardPathRef.current && !storagePath) {
+        newPath = null; // organiser pressed Remove
+      }
 
-    if (file && newPath) {
-      setBusyLabel("Uploading file…");
-      const { error: uploadError } = await supabase.storage
-        .from("rewards")
-        .upload(newPath, file, { upsert: true, contentType: file.type });
-      if (uploadError) {
-        setErrors({
-          _form:
-            "The campaign saved, but the file upload failed — try the upload again from Edit.",
+      if (file && newPath) {
+        if (!silent) setBusyLabel("Uploading file…");
+        const { error: uploadError } = await supabase.storage
+          .from("rewards")
+          .upload(newPath, file, { upsert: true, contentType: file.type });
+        if (uploadError) {
+          if (!silent) {
+            setErrors({
+              _form:
+                "The campaign saved, but the file upload failed — try the upload again.",
+            });
+          }
+          setSaveState("error");
+          return false;
+        }
+      }
+
+      if (newPath !== undefined) {
+        const { error: pathError } = await supabase
+          .from("campaigns")
+          .update({ reward_storage_path: newPath })
+          .eq("id", id);
+        if (pathError) {
+          if (!silent) setErrors({ _form: "Couldn't attach the file. Try again." });
+          setSaveState("error");
+          return false;
+        }
+        // Tidy up a replaced or removed file; best-effort only.
+        const previous = savedRewardPathRef.current;
+        if (previous && previous !== newPath) {
+          await supabase.storage.from("rewards").remove([previous]);
+        }
+        savedRewardPathRef.current = newPath;
+        setFile(null);
+        if (newPath) setStoragePath(newPath);
+      }
+
+      // Background image — uploaded through our own API route, which does
+      // the storage write server-side after checking ownership. No bucket
+      // policies involved, so this can't hit a storage RLS wall.
+      if (bgBlob) {
+        if (!silent) setBusyLabel("Uploading background…");
+        const fd = new FormData();
+        fd.append("file", bgBlob.blob, `background.${bgBlob.ext}`);
+        const res = await fetch(`/api/dashboard/campaigns/${id}/background`, {
+          method: "POST",
+          body: fd,
         });
-        setBusy(false);
-        setBusyLabel("Saving…");
-        return;
-      }
-    }
-
-    if (newPath !== undefined) {
-      const { error: pathError } = await supabase
-        .from("campaigns")
-        .update({ reward_storage_path: newPath })
-        .eq("id", savedId);
-      if (pathError) {
-        setErrors({ _form: "Couldn't attach the file. Try again." });
-        setBusy(false);
-        setBusyLabel("Saving…");
-        return;
-      }
-      // Tidy up a replaced or removed file; best-effort only.
-      if (originalPath && originalPath !== newPath) {
-        await supabase.storage.from("rewards").remove([originalPath]);
-      }
-    }
-
-    // Background image changes — PUBLIC backgrounds bucket, never rewards.
-    // A timestamped name means a replacement gets a fresh URL instead of a
-    // stale cached copy of the old object.
-    let newBgPath: string | null | undefined = undefined;
-    if (bgBlob) {
-      newBgPath = `${user.id}/${savedId}/background-${Date.now()}.${bgBlob.ext}`;
-    } else if (originalBgPath && !bgPath) {
-      newBgPath = null; // organiser pressed Remove
-    }
-
-    if (bgBlob && newBgPath) {
-      setBusyLabel("Uploading background…");
-      const { error: bgUploadError } = await supabase.storage
-        .from("backgrounds")
-        .upload(newBgPath, bgBlob.blob, {
-          upsert: true,
-          contentType: bgBlob.blob.type,
+        if (!res.ok) {
+          if (!silent) {
+            setErrors({
+              _form:
+                "The campaign saved, but the background upload failed — try again.",
+            });
+          }
+          setSaveState("error");
+          return false;
+        }
+        const json = (await res.json()) as { path: string };
+        savedBgPathRef.current = json.path;
+        setBgBlob(null);
+        setBgPath(json.path);
+        setBgPreviewUrl((old) => {
+          if (old) URL.revokeObjectURL(old);
+          return null;
         });
-      if (bgUploadError) {
-        setErrors({
-          _form:
-            "The campaign saved, but the background upload failed — try again from Edit.",
+      } else if (savedBgPathRef.current && !bgPath) {
+        const res = await fetch(`/api/dashboard/campaigns/${id}/background`, {
+          method: "DELETE",
         });
+        if (!res.ok) {
+          if (!silent) {
+            setErrors({ _form: "Couldn't remove the background image. Try again." });
+          }
+          setSaveState("error");
+          return false;
+        }
+        savedBgPathRef.current = null;
+      }
+
+      // Everything's persisted — leaving is no longer a loss.
+      guard?.setDirty(false);
+      setSaveState("saved");
+      setLastSavedAt(new Date());
+      if (navigate) {
+        router.push("/dashboard");
+        router.refresh();
+      }
+      return true;
+    } finally {
+      persistInFlightRef.current = false;
+      if (!silent) {
         setBusy(false);
         setBusyLabel("Saving…");
-        return;
       }
     }
+  }
+  persistRef.current = persist;
 
-    if (newBgPath !== undefined) {
-      const { error: bgPathError } = await supabase
-        .from("campaigns")
-        .update({ background_image_path: newBgPath })
-        .eq("id", savedId);
-      if (bgPathError) {
-        setErrors({ _form: "Couldn't attach the background image. Try again." });
-        setBusy(false);
-        setBusyLabel("Saving…");
-        return;
-      }
-      // Replacing or removing deletes the old object; best-effort only.
-      if (originalBgPath && originalBgPath !== newBgPath) {
-        await supabase.storage.from("backgrounds").remove([originalBgPath]);
-      }
-    }
-
-    // Everything's persisted — leaving is no longer a loss.
-    guard?.setDirty(false);
-    router.push("/dashboard");
-    router.refresh();
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    await persist({ navigate: true, silent: false });
   }
 
   return (
@@ -850,13 +961,21 @@ export default function OrganiserCampaignForm({
         </div>
       </div>
 
-      <div className="flex gap-3 pt-2">
+      <div className="flex flex-wrap items-center gap-3 pt-2">
         <button
           type="submit"
           disabled={busy}
           className="rounded-full bg-forest-deep px-7 py-3 font-semibold text-parchment transition active:scale-[0.98] disabled:opacity-50"
         >
-          {busy ? busyLabel : campaignId ? "Save changes" : "Create draft"}
+          {busy ? busyLabel : savedId ? "Save & close" : "Create draft"}
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => persist({ navigate: false, silent: false })}
+          className="rounded-full border border-ink/30 px-7 py-3 font-medium text-ink/80 transition hover:border-ink/60 disabled:opacity-50"
+        >
+          Save
         </button>
         <button
           type="button"
@@ -870,11 +989,20 @@ export default function OrganiserCampaignForm({
         >
           Cancel
         </button>
+        <p className="text-xs text-ink/50" aria-live="polite">
+          {saveState === "saving"
+            ? "Saving…"
+            : saveState === "error"
+              ? "Couldn't save — check the form."
+              : lastSavedAt
+                ? `Draft saved ${lastSavedAt.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}`
+                : ""}
+        </p>
       </div>
-      {!campaignId && (
+      {!savedId && (
         <p className="text-xs text-ink/50">
-          New campaigns start as drafts — you publish them from the dashboard
-          when you&apos;re ready.
+          New campaigns start as drafts and save automatically as you go —
+          you publish them from the dashboard when you&apos;re ready.
         </p>
       )}
     </form>
