@@ -106,6 +106,24 @@ body {
   background: var(--clay);
 }
 
+/* Ghost markers for scanned-but-uncommitted preset locations — outline
+   only, no fill, so they read as obviously provisional next to the
+   solid committed markers above. */
+.moment-marker-ghost {
+  box-sizing: border-box;
+  width: 18px;
+  height: 18px;
+  background: transparent;
+  border: 2px dashed var(--ink);
+  opacity: 0.55;
+  cursor: pointer;
+}
+.moment-marker-ghost--selected {
+  border-style: solid;
+  border-color: var(--clay);
+  opacity: 0.9;
+}
+
 /* Leaflet control chrome, restyled to match the app rather than the
    library's default blue-and-white look. */
 .leaflet-container {

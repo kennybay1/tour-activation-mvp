@@ -23,6 +23,17 @@ export type { BuilderLocation };
 
 const LONDON: [number, number] = [51.5074, -0.1278];
 const VIEW_KEY = "moments_map_view";
+const MIN_SCAN_RADIUS = 100;
+const MAX_SCAN_RADIUS = 5000;
+
+type GhostKiosk = {
+  external_ref: string;
+  location_name: string;
+  lat: number;
+  lng: number;
+  design: string | null;
+  selected: boolean;
+};
 
 function haversineMeters(
   lat1: number,
@@ -50,6 +61,17 @@ function markerIcon(n: number, active: boolean): L.DivIcon {
     ).padStart(2, "0")}</div>`,
     iconSize: [30, 30],
     iconAnchor: [15, 15],
+  });
+}
+
+// Outline-only square, no fill — visually unmistakable from a committed
+// (filled circular) marker, since it isn't one yet.
+function ghostIcon(selected: boolean): L.DivIcon {
+  return L.divIcon({
+    className: "",
+    html: `<div class="moment-marker-ghost${selected ? " moment-marker-ghost--selected" : ""}"></div>`,
+    iconSize: [20, 20],
+    iconAnchor: [10, 10],
   });
 }
 
@@ -110,6 +132,15 @@ export default function LocationBuilder({
   const [selected, setSelected] = useState<string | null>(null);
   const [addMode, setAddMode] = useState(false);
   const didInitialFit = useRef(false);
+
+  // Preset scanner state — entirely separate from the committed
+  // `locations` array until the organiser explicitly commits.
+  const [scanOpen, setScanOpen] = useState(false);
+  const [scanCenter, setScanCenter] = useState<{ lat: number; lng: number } | null>(null);
+  const [scanRadius, setScanRadius] = useState(1000);
+  const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
+  const [ghosts, setGhosts] = useState<GhostKiosk[]>([]);
 
   const initialView = useMemo(() => {
     try {
@@ -200,6 +231,123 @@ export default function LocationBuilder({
 
   const atCap = locations.length >= MAX_LOCATIONS;
 
+  // ── Preset scanner ──────────────────────────────────────────────
+
+  const committedRefs = useMemo(
+    () => new Set(locations.map((l) => l.external_ref).filter(Boolean) as string[]),
+    [locations]
+  );
+
+  const openScan = () => {
+    const m = mapRef.current;
+    if (!m) return;
+    const c = m.getCenter();
+    const size = m.getSize();
+    // Default the scan radius to whatever's already visible on screen —
+    // "use the current map bounds by default" — clamped to the API's
+    // accepted range. If the container hasn't been laid out yet (size is
+    // degenerate), fall back to a sensible fixed default rather than
+    // trusting a near-zero bounding box.
+    let defaultRadius = 1000;
+    if (size.x > 0 && size.y > 0) {
+      const bounds = m.getBounds();
+      const edgeDistance = Math.min(
+        haversineMeters(c.lat, c.lng, bounds.getNorth(), c.lng),
+        haversineMeters(c.lat, c.lng, bounds.getSouth(), c.lng),
+        haversineMeters(c.lat, c.lng, c.lat, bounds.getEast()),
+        haversineMeters(c.lat, c.lng, c.lat, bounds.getWest())
+      );
+      if (edgeDistance > MIN_SCAN_RADIUS) defaultRadius = edgeDistance;
+    }
+    setScanCenter({ lat: c.lat, lng: c.lng });
+    setScanRadius(
+      Math.round(Math.min(MAX_SCAN_RADIUS, Math.max(MIN_SCAN_RADIUS, defaultRadius)))
+    );
+    setGhosts([]);
+    setScanError(null);
+    setScanOpen(true);
+  };
+
+  const closeScan = () => {
+    setScanOpen(false);
+    setGhosts([]);
+    setScanError(null);
+    setScanning(false);
+  };
+
+  const runScan = async () => {
+    if (!scanCenter || scanning) return;
+    const radius = Math.round(
+      Math.min(MAX_SCAN_RADIUS, Math.max(MIN_SCAN_RADIUS, scanRadius))
+    );
+    setScanning(true);
+    setScanError(null);
+    try {
+      const res = await fetch("/api/presets/phone-boxes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lat: scanCenter.lat, lng: scanCenter.lng, radius }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        setScanError(
+          typeof json.error === "string"
+            ? json.error
+            : "Couldn't scan this area. Try again."
+        );
+        setGhosts([]);
+        return;
+      }
+      setGhosts(
+        (json.locations as Omit<GhostKiosk, "selected">[]).map((k) => ({
+          ...k,
+          selected: true,
+        }))
+      );
+    } catch {
+      setScanError("Couldn't reach the scan service. Check your connection and try again.");
+      setGhosts([]);
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  const toggleGhost = (ref: string) =>
+    setGhosts((gs) =>
+      gs.map((g) => (g.external_ref === ref ? { ...g, selected: !g.selected } : g))
+    );
+
+  const selectableGhosts = ghosts.filter((g) => !committedRefs.has(g.external_ref));
+  const selectedCount = selectableGhosts.filter((g) => g.selected).length;
+
+  const commitGhosts = () => {
+    const toCommit = selectableGhosts.filter((g) => g.selected);
+    if (!toCommit.length) return;
+    const total = locations.length + toCommit.length;
+    if (total > MAX_LOCATIONS) {
+      setScanError(
+        `Committing these ${toCommit.length} would put you at ${total} locations — over the ${MAX_LOCATIONS} limit. Deselect some first.`
+      );
+      return;
+    }
+    const newLocs: BuilderLocation[] = toCommit.map((g, i) => ({
+      tempId: makeTempId(),
+      location_name: g.location_name,
+      lat: g.lat,
+      lng: g.lng,
+      radius_m: DEFAULT_RADIUS_M,
+      sort_order: locations.length + i,
+      source: "preset:k6",
+      external_ref: g.external_ref,
+    }));
+    onChange([...locations, ...newLocs]);
+    const committed = new Set(toCommit.map((g) => g.external_ref));
+    const remaining = ghosts.filter((g) => !committed.has(g.external_ref));
+    setGhosts(remaining);
+    setScanError(null);
+    if (!remaining.length) setScanOpen(false);
+  };
+
   const controlBtn =
     "rounded-full border border-ink/30 bg-cream px-4 py-1.5 text-xs font-medium text-ink/80 shadow-sm transition hover:border-ink/60 disabled:opacity-50";
 
@@ -219,6 +367,7 @@ export default function LocationBuilder({
           <MapReady onReady={onMapReady} />
           <ViewPersist />
           <ClickToPlace active={addMode && !atCap} onPlace={addAt} />
+
           {locations.map((l, i) => (
             <Marker
               key={l.tempId}
@@ -259,6 +408,44 @@ export default function LocationBuilder({
               }}
             />
           ))}
+
+          {scanOpen && scanCenter && (
+            <Circle
+              center={[scanCenter.lat, scanCenter.lng]}
+              radius={scanRadius}
+              pathOptions={{
+                color: "#b0603a",
+                weight: 2,
+                dashArray: "8 6",
+                fillOpacity: 0,
+              }}
+            />
+          )}
+          {ghosts.map((g) => (
+            <Marker
+              key={g.external_ref}
+              position={[g.lat, g.lng]}
+              icon={ghostIcon(g.selected && !committedRefs.has(g.external_ref))}
+              eventHandlers={{
+                click: () => {
+                  if (!committedRefs.has(g.external_ref)) toggleGhost(g.external_ref);
+                },
+              }}
+            />
+          ))}
+          {ghosts.map((g) => (
+            <Circle
+              key={`gc-${g.external_ref}`}
+              center={[g.lat, g.lng]}
+              radius={DEFAULT_RADIUS_M}
+              pathOptions={{
+                color: g.selected ? "#b0603a" : "#a9bfae",
+                weight: 1,
+                dashArray: "4 4",
+                fillOpacity: 0,
+              }}
+            />
+          ))}
         </MapContainer>
 
         <div className="absolute right-3 top-3 z-[1000] flex flex-col items-end gap-2">
@@ -290,7 +477,124 @@ export default function LocationBuilder({
           >
             Fit all
           </button>
+          <button
+            type="button"
+            onClick={() => (scanOpen ? closeScan() : openScan())}
+            disabled={atCap && !scanOpen}
+            className={
+              scanOpen
+                ? "rounded-full bg-clay px-4 py-1.5 text-xs font-semibold text-cream shadow-sm transition"
+                : controlBtn
+            }
+          >
+            {scanOpen ? "Scanning presets — on" : "Scan presets"}
+          </button>
         </div>
+
+        {scanOpen && (
+          <div className="absolute bottom-3 left-3 right-3 z-[1000] max-h-[300px] overflow-y-auto rounded-2xl border border-ink/25 bg-cream/95 p-4 shadow-md backdrop-blur-sm sm:right-auto sm:w-80">
+            <p className="text-xs font-medium uppercase tracking-[0.15em] text-ink/60">
+              Scan for red telephone kiosks
+            </p>
+            <div className="mt-3 flex items-center gap-2">
+              <label className="flex items-center gap-1.5 font-mono text-xs text-ink/60">
+                Radius
+                <input
+                  inputMode="numeric"
+                  value={String(scanRadius)}
+                  onChange={(e) =>
+                    setScanRadius(
+                      Number(e.target.value.replace(/[^0-9]/g, "")) || 0
+                    )
+                  }
+                  className="w-20 rounded-lg border border-ink/20 bg-transparent px-2 py-1.5 text-right text-sm text-ink outline-none focus:border-forest"
+                />
+                m
+              </label>
+              <button
+                type="button"
+                onClick={runScan}
+                disabled={
+                  scanning ||
+                  scanRadius < MIN_SCAN_RADIUS ||
+                  scanRadius > MAX_SCAN_RADIUS
+                }
+                className="rounded-full bg-forest-deep px-4 py-1.5 text-xs font-semibold text-parchment transition active:scale-[0.98] disabled:opacity-50"
+              >
+                {scanning ? "Scanning…" : ghosts.length ? "Scan again" : "Run scan"}
+              </button>
+            </div>
+            {(scanRadius < MIN_SCAN_RADIUS || scanRadius > MAX_SCAN_RADIUS) && (
+              <p className="mt-1 text-xs font-medium text-clay">
+                Radius must be between {MIN_SCAN_RADIUS} and {MAX_SCAN_RADIUS}m.
+              </p>
+            )}
+            {scanError && (
+              <p className="mt-2 text-xs font-medium text-clay">{scanError}</p>
+            )}
+
+            {ghosts.length > 0 && (
+              <>
+                <p className="mt-4 font-serif text-lg">
+                  {ghosts.length} KIOSK{ghosts.length === 1 ? "" : "S"} FOUND
+                </p>
+                <p className="text-xs text-ink/50">{selectedCount} selected</p>
+                <div className="mt-2 max-h-40 space-y-1 overflow-y-auto">
+                  {ghosts.map((g, i) => {
+                    const already = committedRefs.has(g.external_ref);
+                    return (
+                      <label
+                        key={g.external_ref}
+                        className={`flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs ${
+                          already ? "opacity-50" : "hover:bg-cream-deep/60"
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={already ? true : g.selected}
+                          disabled={already}
+                          onChange={() => toggleGhost(g.external_ref)}
+                          className="h-4 w-4 shrink-0 accent-clay"
+                        />
+                        <span className="shrink-0 font-mono text-clay">
+                          K-{String(i + 1).padStart(3, "0")}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate text-ink/80">
+                          {g.location_name}
+                        </span>
+                        {already && (
+                          <span className="shrink-0 text-ink/50">
+                            Already added
+                          </span>
+                        )}
+                      </label>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+
+            <div className="mt-4 flex gap-2">
+              {ghosts.length > 0 && (
+                <button
+                  type="button"
+                  onClick={commitGhosts}
+                  disabled={selectedCount === 0}
+                  className="rounded-full bg-forest-deep px-4 py-1.5 text-xs font-semibold text-parchment transition active:scale-[0.98] disabled:opacity-50"
+                >
+                  Commit preset nodes
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={closeScan}
+                className="rounded-full border border-ink/30 px-4 py-1.5 text-xs font-medium text-ink/70 transition hover:border-ink/60"
+              >
+                {ghosts.length ? "Clear scan" : "Cancel"}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {atCap && (
@@ -378,6 +682,11 @@ export default function LocationBuilder({
                 {overlapping.has(l.tempId) && (
                   <p className="text-xs text-ink/50">
                     Overlaps another circle — nearest wins.
+                  </p>
+                )}
+                {l.source === "preset:k6" && (
+                  <p className="text-xs text-ink/40">
+                    From phone-box scan{l.external_ref ? ` · ${l.external_ref}` : ""}
                   </p>
                 )}
               </div>
