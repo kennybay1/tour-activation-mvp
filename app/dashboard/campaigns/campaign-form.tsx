@@ -1,17 +1,30 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import {
   validateCampaignCore,
-  validateLocationRow,
   suggestSlug,
-  DEFAULT_RADIUS_M,
-  RADIUS_WARN_BELOW,
   type CampaignInput,
-  type LocationRowInput,
 } from "@/lib/campaign-schema";
+import {
+  type BuilderLocation,
+  MAX_LOCATIONS,
+} from "./location-types";
+
+// Leaflet touches window/document at import time, so it can only run in
+// the browser — ssr:false is required here, and next/dynamic only allows
+// that inside a Client Component (this file is one).
+const LocationBuilder = dynamic(() => import("./location-builder"), {
+  ssr: false,
+  loading: () => (
+    <div className="flex h-[380px] items-center justify-center rounded-2xl border border-ink/25 bg-cream-deep/40 text-sm text-ink/50">
+      Loading map…
+    </div>
+  ),
+});
 
 export type OrganiserFormValues = {
   slug: string;
@@ -37,13 +50,6 @@ const EMPTY: OrganiserFormValues = {
   ticket_url: "",
   startsLocal: "",
   endsLocal: "",
-};
-
-const EMPTY_LOCATION: LocationRowInput = {
-  location_name: "",
-  lat: "",
-  lng: "",
-  radius_m: String(DEFAULT_RADIUS_M),
 };
 
 function localToIso(local: string): string {
@@ -73,6 +79,41 @@ function sanitizeFilename(name: string): string {
     .replace(/^-|-$/g, "");
 }
 
+function validateLocations(
+  locations: BuilderLocation[]
+): { formError?: string; rowErrors: Record<string, string> } {
+  const rowErrors: Record<string, string> = {};
+  if (locations.length === 0) {
+    return {
+      formError: "Add at least one location on the map before saving.",
+      rowErrors,
+    };
+  }
+  if (locations.length > MAX_LOCATIONS) {
+    return {
+      formError: `A campaign can hold at most ${MAX_LOCATIONS} locations.`,
+      rowErrors,
+    };
+  }
+  for (const loc of locations) {
+    if (!loc.location_name.trim()) {
+      rowErrors[loc.tempId] = "Name is required.";
+    } else if (!Number.isFinite(loc.lat) || loc.lat < -90 || loc.lat > 90) {
+      rowErrors[loc.tempId] = "Latitude must be between -90 and 90.";
+    } else if (!Number.isFinite(loc.lng) || loc.lng < -180 || loc.lng > 180) {
+      rowErrors[loc.tempId] = "Longitude must be between -180 and 180.";
+    } else if (!Number.isInteger(loc.radius_m) || loc.radius_m <= 0) {
+      rowErrors[loc.tempId] = "Radius must be a whole number of metres.";
+    }
+  }
+  return {
+    formError: Object.keys(rowErrors).length
+      ? "Fix the highlighted locations before saving."
+      : undefined,
+    rowErrors,
+  };
+}
+
 export default function OrganiserCampaignForm({
   campaignId,
   initial,
@@ -86,24 +127,14 @@ export default function OrganiserCampaignForm({
   startsIso?: string;
   endsIso?: string;
   storagePath?: string | null;
-  initialLocations?: LocationRowInput[];
+  initialLocations?: BuilderLocation[];
 }) {
   const router = useRouter();
   const [values, setValues] = useState<OrganiserFormValues>(initial ?? EMPTY);
-  const [locRows, setLocRows] = useState<LocationRowInput[]>(
-    initialLocations?.length ? initialLocations : [{ ...EMPTY_LOCATION }]
+  const [locations, setLocations] = useState<BuilderLocation[]>(
+    initialLocations ?? []
   );
-
-  const setLoc = (i: number, key: keyof LocationRowInput, value: string) =>
-    setLocRows((rows) =>
-      rows.map((r, idx) => (idx === i ? { ...r, [key]: value } : r))
-    );
-  const addLoc = () =>
-    setLocRows((rows) => [...rows, { ...EMPTY_LOCATION }]);
-  const removeLoc = (i: number) =>
-    setLocRows((rows) =>
-      rows.length > 1 ? rows.filter((_, idx) => idx !== i) : rows
-    );
+  const [locErrors, setLocErrors] = useState<Record<string, string>>({});
   const [slugTouched, setSlugTouched] = useState(Boolean(campaignId));
   const [slugStatus, setSlugStatus] = useState<
     "idle" | "checking" | "available" | "taken"
@@ -162,24 +193,6 @@ export default function OrganiserCampaignForm({
     setValues((v) => ({ ...v, slug: suggestSlug(v.artist_name, "") }));
   }, [values.artist_name, slugTouched, campaignId]);
 
-  const rowMapsPreview = (r: LocationRowInput): string | null => {
-    const lat = Number(r.lat);
-    const lng = Number(r.lng);
-    if (
-      r.lat.trim() === "" ||
-      r.lng.trim() === "" ||
-      Number.isNaN(lat) ||
-      Number.isNaN(lng)
-    )
-      return null;
-    return `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
-  };
-
-  const rowRadiusLow = (r: LocationRowInput): boolean =>
-    r.radius_m.trim() !== "" &&
-    Number(r.radius_m) > 0 &&
-    Number(r.radius_m) < RADIUS_WARN_BELOW;
-
   // Best-effort availability check: own campaigns (RLS) + live public ones.
   // The database's unique constraint is the real enforcement on save.
   async function onSlugBlur() {
@@ -210,11 +223,9 @@ export default function OrganiserCampaignForm({
       is_active: true,
     };
     const clientErrors = validateCampaignCore(payload);
-    locRows.forEach((r, i) => {
-      for (const [k, v] of Object.entries(validateLocationRow(r))) {
-        clientErrors[`loc_${i}_${k}`] = v;
-      }
-    });
+    const { formError, rowErrors } = validateLocations(locations);
+    if (formError) clientErrors._form = formError;
+    setLocErrors(rowErrors);
     if (Object.keys(clientErrors).length > 0) {
       setErrors(clientErrors);
       setBusy(false);
@@ -280,12 +291,13 @@ export default function OrganiserCampaignForm({
     }
 
     // Sync the locations list — update kept rows, insert new ones, delete
-    // removed ones. RLS scopes every statement to this owner.
+    // removed ones. RLS scopes every statement to this owner. Locations
+    // are only written here, on save — not on every marker drag.
     const { data: existingLocs } = await supabase
       .from("campaign_locations")
       .select("id")
       .eq("campaign_id", savedId);
-    const keepIds = new Set(locRows.map((r) => r.id).filter(Boolean));
+    const keepIds = new Set(locations.map((l) => l.id).filter(Boolean));
     const toDelete = (existingLocs ?? [])
       .map((l) => l.id)
       .filter((id) => !keepIds.has(id));
@@ -303,20 +315,22 @@ export default function OrganiserCampaignForm({
         return;
       }
     }
-    for (let i = 0; i < locRows.length; i++) {
-      const r = locRows[i];
+    for (let i = 0; i < locations.length; i++) {
+      const l = locations[i];
       const locData = {
-        location_name: r.location_name.trim(),
-        lat: Number(r.lat),
-        lng: Number(r.lng),
-        radius_m: Number(r.radius_m),
+        location_name: l.location_name.trim(),
+        lat: l.lat,
+        lng: l.lng,
+        radius_m: l.radius_m,
         sort_order: i,
+        source: l.source,
+        external_ref: l.external_ref ?? null,
       };
-      const res = r.id
+      const res = l.id
         ? await supabase
             .from("campaign_locations")
             .update(locData)
-            .eq("id", r.id)
+            .eq("id", l.id)
         : await supabase
             .from("campaign_locations")
             .insert({ ...locData, campaign_id: savedId });
@@ -440,107 +454,14 @@ export default function OrganiserCampaignForm({
           Locations
         </p>
         <p className="mb-3 text-xs text-ink/50">
-          Fans can unlock at any of these — the nearest one counts.
-          Right-click each spot in Google Maps and copy the coordinates.
+          Fans can unlock at any of these — the nearest one counts. Drag
+          markers to fine-tune, or add more spots on the map.
         </p>
-        <div className="space-y-4">
-          {locRows.map((r, i) => {
-            const preview = rowMapsPreview(r);
-            return (
-              <div
-                key={r.id ?? `new-${i}`}
-                className="rounded-2xl border border-ink/25 p-4"
-              >
-                <div className="flex items-center justify-between gap-3">
-                  <span className="font-mono text-xs text-clay">
-                    {String(i + 1).padStart(2, "0")}
-                  </span>
-                  {locRows.length > 1 && (
-                    <button
-                      type="button"
-                      onClick={() => removeLoc(i)}
-                      className="rounded-full border border-ink/30 px-3 py-1 text-xs font-medium text-ink/60 transition hover:border-ink/60"
-                    >
-                      Remove
-                    </button>
-                  )}
-                </div>
-                <div className="mt-3 space-y-4">
-                  <Field
-                    label="Location name"
-                    error={errors[`loc_${i}_location_name`]}
-                  >
-                    <input
-                      className={inputCls}
-                      value={r.location_name}
-                      onChange={(e) =>
-                        setLoc(i, "location_name", e.target.value)
-                      }
-                      placeholder="Outside the Roundhouse, Chalk Farm Rd"
-                    />
-                  </Field>
-                  <div className="grid grid-cols-2 gap-4">
-                    <Field label="Latitude" error={errors[`loc_${i}_lat`]}>
-                      <input
-                        className={inputCls}
-                        inputMode="decimal"
-                        value={r.lat}
-                        onChange={(e) => setLoc(i, "lat", e.target.value)}
-                        placeholder="51.5432"
-                      />
-                    </Field>
-                    <Field label="Longitude" error={errors[`loc_${i}_lng`]}>
-                      <input
-                        className={inputCls}
-                        inputMode="decimal"
-                        value={r.lng}
-                        onChange={(e) => setLoc(i, "lng", e.target.value)}
-                        placeholder="-0.1519"
-                      />
-                    </Field>
-                  </div>
-                  {preview && (
-                    <p className="-mt-2 text-xs">
-                      <a
-                        href={preview}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="font-medium text-clay underline underline-offset-4"
-                      >
-                        Preview on Google Maps
-                      </a>
-                    </p>
-                  )}
-                  <Field
-                    label="Unlock radius (metres)"
-                    error={errors[`loc_${i}_radius_m`]}
-                    hint="How close a fan must be to unlock. Default 200."
-                  >
-                    <input
-                      className={inputCls}
-                      inputMode="numeric"
-                      value={r.radius_m}
-                      onChange={(e) => setLoc(i, "radius_m", e.target.value)}
-                    />
-                    {rowRadiusLow(r) && (
-                      <p className="mt-1 text-xs font-medium text-clay">
-                        Below {RADIUS_WARN_BELOW}m, everyday GPS wobble may
-                        block real fans who are actually there.
-                      </p>
-                    )}
-                  </Field>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-        <button
-          type="button"
-          onClick={addLoc}
-          className="mt-3 rounded-full border border-ink/30 px-5 py-2 text-sm font-medium text-ink/70 transition hover:border-ink/60"
-        >
-          + Add location
-        </button>
+        <LocationBuilder
+          locations={locations}
+          onChange={setLocations}
+          rowErrors={locErrors}
+        />
       </div>
 
       <Field label="Reward teaser" error={errors.reward_teaser}>

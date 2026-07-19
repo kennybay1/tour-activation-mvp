@@ -82,3 +82,45 @@ body {
 .fade-up {
   animation: fade-up 0.55s cubic-bezier(0.2, 0.7, 0.3, 1) both;
 }
+
+/* CSS-drawn map markers for the location builder — sidesteps Leaflet's
+   default-icon 404 bundler issue entirely, and keeps markers in the same
+   visual language as the rest of the dashboard. */
+.moment-marker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 9999px;
+  background: var(--forest-deep);
+  color: var(--parchment);
+  border: 2px solid var(--cream);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  font-family: var(--font-plex-mono), monospace;
+  font-size: 10px;
+  font-weight: 500;
+  cursor: grab;
+}
+.moment-marker--active {
+  background: var(--clay);
+}
+
+/* Leaflet control chrome, restyled to match the app rather than the
+   library's default blue-and-white look. */
+.leaflet-container {
+  font-family: var(--font-archivo), sans-serif;
+  background: var(--cream-deep);
+}
+.leaflet-control-zoom a {
+  background: var(--cream) !important;
+  color: var(--ink) !important;
+  border-color: var(--line) !important;
+}
+.leaflet-control-attribution {
+  background: rgba(242, 237, 224, 0.85) !important;
+  color: var(--ink) !important;
+}
+.leaflet-control-attribution a {
+  color: var(--forest) !important;
+}

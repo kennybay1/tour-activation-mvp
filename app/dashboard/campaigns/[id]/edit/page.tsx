@@ -20,7 +20,7 @@ export default async function EditCampaignPage({
     supabase.from("campaigns").select("*").eq("id", id).maybeSingle(),
     supabase
       .from("campaign_locations")
-      .select("id, location_name, lat, lng, radius_m")
+      .select("id, location_name, lat, lng, radius_m, sort_order, source, external_ref")
       .eq("campaign_id", id)
       .order("sort_order"),
   ]);
@@ -45,12 +45,19 @@ export default async function EditCampaignPage({
     endsLocal: "",
   };
 
+  // tempId reuses the DB id — stable across re-renders, and doubles as
+  // the "this row already exists" marker the form uses to decide
+  // update vs. insert on save.
   const initialLocations = (locs ?? []).map((l) => ({
     id: l.id,
+    tempId: l.id,
     location_name: l.location_name,
-    lat: String(l.lat),
-    lng: String(l.lng),
-    radius_m: String(l.radius_m),
+    lat: l.lat,
+    lng: l.lng,
+    radius_m: l.radius_m,
+    sort_order: l.sort_order,
+    source: l.source,
+    external_ref: l.external_ref ?? undefined,
   }));
 
   return (
