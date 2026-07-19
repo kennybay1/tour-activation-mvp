@@ -7,6 +7,7 @@ import {
   TileLayer,
   Marker,
   Circle,
+  ZoomControl,
   useMap,
   useMapEvents,
 } from "react-leaflet";
@@ -18,6 +19,7 @@ import {
   SOFT_WARN_LOCATIONS,
   makeTempId,
 } from "./location-types";
+import LocationSearch, { type GeocodeResult } from "./location-search";
 
 export type { BuilderLocation };
 
@@ -162,6 +164,36 @@ export default function LocationBuilder({
       L.latLngBounds(locations.map((l) => [l.lat, l.lng] as [number, number])),
       { padding: [40, 40], maxZoom: 16 }
     );
+  };
+
+  // ── Place search ────────────────────────────────────────────────
+  // Search only ever moves the viewport — it never creates a location.
+  // Committing a coordinate still happens exclusively via Add/Click to
+  // place, matching the existing centre-drop flow below.
+
+  const getMapBounds = () => {
+    const m = mapRef.current;
+    if (!m) return null;
+    const b = m.getBounds();
+    return {
+      minLat: b.getSouth(),
+      minLng: b.getWest(),
+      maxLat: b.getNorth(),
+      maxLng: b.getEast(),
+    };
+  };
+
+  const navigateToResult = (result: GeocodeResult) => {
+    const m = mapRef.current;
+    if (!m) return;
+    if (result.boundingbox) {
+      const [minLat, maxLat, minLng, maxLng] = result.boundingbox;
+      m.fitBounds(L.latLngBounds([minLat, minLng], [maxLat, maxLng]), {
+        padding: [40, 40],
+      });
+    } else {
+      m.flyTo([result.lat, result.lng], 16);
+    }
   };
 
   const onMapReady = (m: L.Map) => {
@@ -359,11 +391,13 @@ export default function LocationBuilder({
           zoom={initialView.zoom}
           style={{ height: 380, width: "100%" }}
           scrollWheelZoom
+          zoomControl={false}
         >
           <TileLayer
             url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
           />
+          <ZoomControl position="bottomleft" />
           <MapReady onReady={onMapReady} />
           <ViewPersist />
           <ClickToPlace active={addMode && !atCap} onPlace={addAt} />
@@ -447,6 +481,16 @@ export default function LocationBuilder({
             />
           ))}
         </MapContainer>
+
+        {/* Persistent, non-interactive crosshair marking the map's exact
+            centre — "Add at centre" drops a marker here. */}
+        <div className="pointer-events-none absolute left-1/2 top-1/2 z-[400] h-5 w-5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-ink/40">
+          <span className="absolute left-1/2 top-1/2 h-1 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-ink/50" />
+        </div>
+
+        <div className="absolute left-3 top-3 z-[1000]">
+          <LocationSearch getBounds={getMapBounds} onNavigate={navigateToResult} />
+        </div>
 
         <div className="absolute right-3 top-3 z-[1000] flex flex-col items-end gap-2">
           <button
