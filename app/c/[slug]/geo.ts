@@ -21,3 +21,12 @@ export function roundLiveDistance(m: number): number {
   if (m < 200) return Math.round(m / 10) * 10;
   return Math.round(m / 50) * 50;
 }
+
+// Human-readable distance for the "closest spot" line. A fan can open the
+// page from anywhere — across town or another country — so this has to
+// degrade gracefully into kilometres rather than printing "342550m".
+export function formatApproxDistance(m: number): string {
+  if (m < 1000) return `${roundLiveDistance(m)}m`;
+  if (m < 10000) return `${(m / 1000).toFixed(1)}km`;
+  return `${Math.round(m / 1000)}km`;
+}

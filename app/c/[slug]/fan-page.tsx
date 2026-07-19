@@ -7,7 +7,7 @@ import { supabase } from "@/lib/supabase";
 import { directionsUrlFor } from "./directions";
 import { FAN_MAP_HEIGHT } from "./fan-map-constants";
 import { formatCountdown, useClockOffsetMs, useCorrectedNow } from "./countdown";
-import { haversineMeters, roundLiveDistance } from "./geo";
+import { formatApproxDistance, haversineMeters, roundLiveDistance } from "./geo";
 
 // Leaflet touches window/document at import time (browser-only), and this
 // page is the top of the conversion funnel on mobile data — the tile
@@ -28,11 +28,11 @@ const FanMap = dynamic(() => import("./fan-map"), {
 });
 
 // A map failure (blocked chunk, offline) must never take the unlock flow
-// down with it — this only ever wraps FanMap, so a caught error just
-// removes the map card; the list above it with working Directions links
-// is a separate render tree and is completely unaffected.
+// down with it — this only ever wraps FanMap. Since the map's pins are now
+// the only route to most spots' Directions links, a caught error swaps in
+// the fallback (the full location list) instead of leaving fans stranded.
 class MapErrorBoundary extends Component<
-  { children: React.ReactNode },
+  { children: React.ReactNode; fallback?: React.ReactNode },
   { hasError: boolean }
 > {
   state = { hasError: false };
@@ -40,7 +40,7 @@ class MapErrorBoundary extends Component<
     return { hasError: true };
   }
   render() {
-    if (this.state.hasError) return null;
+    if (this.state.hasError) return this.props.fallback ?? null;
     return this.props.children;
   }
 }
@@ -346,49 +346,88 @@ function RewardTeaserCard({ teaser }: { teaser: string }) {
 
 function LocationsCard({
   locations,
+  nearest,
   focusedLocationId,
   focusNonce,
   onFocusLocation,
 }: {
   locations: SpotLocation[];
+  nearest: { location: SpotLocation; distanceM: number } | null;
   focusedLocationId: string | null;
   focusNonce: number;
   onFocusLocation: (id: string) => void;
 }) {
+  // Only one spot gets a row above the map: the closest once we know where
+  // the fan is. A lone location is trivially "closest" with no position at
+  // all; with several spots and no position yet, the map alone carries it.
+  const featured =
+    nearest?.location ?? (locations.length === 1 ? locations[0] : null);
+
+  // If the map chunk ever fails to load, its pins' Directions links go with
+  // it — the boundary swaps in this full list so every spot stays reachable.
+  const fullListFallback = (
+    <ul className="space-y-4">
+      {locations.map((l) => (
+        <li key={l.id} className="flex items-center gap-3">
+          <p className="min-w-0 flex-1 text-lg font-medium">
+            {l.location_name}
+          </p>
+          <a
+            href={directionsUrlFor(l)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="shrink-0 rounded-full border border-clay/60 px-4 py-2 text-sm font-medium text-clay transition active:scale-[0.98]"
+          >
+            Directions
+          </a>
+        </li>
+      ))}
+    </ul>
+  );
+
   return (
     <div className="rounded-2xl border border-ink/25 p-5">
       <p className="text-xs font-medium uppercase tracking-[0.3em] text-ink/50">
-        {locations.length > 1 ? "The spots" : "The spot"}
+        {locations.length === 1
+          ? "The spot"
+          : nearest
+            ? "Your closest spot"
+            : "The spots"}
       </p>
       {locations.length > 1 && (
         <p className="mt-2 text-sm text-ink/70">
-          Unlock at any of {locations.length} locations.
+          {nearest
+            ? `Unlock at any of ${locations.length} locations — the others are pins on the map.`
+            : `Unlock at any of ${locations.length} locations — tap a pin on the map for directions.`}
         </p>
       )}
-      <ul className="mt-2 space-y-4">
-        {locations.map((l) => (
-          <li key={l.id} className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={() => onFocusLocation(l.id)}
-              className="min-w-0 flex-1 text-left"
-            >
-              <p className="text-lg font-medium">{l.location_name}</p>
-            </button>
-            <a
-              href={directionsUrlFor(l)}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="shrink-0 rounded-full border border-clay/60 px-4 py-2 text-sm font-medium text-clay transition active:scale-[0.98]"
-            >
-              Directions
-            </a>
-          </li>
-        ))}
-      </ul>
+      {featured && (
+        <div className="mt-2 flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => onFocusLocation(featured.id)}
+            className="min-w-0 flex-1 text-left"
+          >
+            <p className="text-lg font-medium">{featured.location_name}</p>
+            {nearest && (
+              <p className="text-sm text-ink/60">
+                about {formatApproxDistance(nearest.distanceM)} away
+              </p>
+            )}
+          </button>
+          <a
+            href={directionsUrlFor(featured)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="shrink-0 rounded-full border border-clay/60 px-4 py-2 text-sm font-medium text-clay transition active:scale-[0.98]"
+          >
+            Directions
+          </a>
+        </div>
+      )}
 
       <div className="mt-4">
-        <MapErrorBoundary>
+        <MapErrorBoundary fallback={fullListFallback}>
           <FanMap
             locations={locations}
             focusedId={focusedLocationId}
@@ -451,6 +490,42 @@ export default function FanPage({ slug }: { slug: string }) {
     lng: number;
     accuracy: number;
   } | null>(null);
+
+  // Display-only position for the "closest spot" card on screens shown
+  // before tracking starts. Fetched once, and ONLY when the browser reports
+  // permission is already granted — so it can never raise a permission
+  // prompt; that moment still belongs to the "I'm here — unlock" tap.
+  // Never feeds claims: attemptClaim only ever runs off the live watcher.
+  const [passivePosition, setPassivePosition] = useState<{
+    lat: number;
+    lng: number;
+  } | null>(null);
+  useEffect(() => {
+    if (!("geolocation" in navigator) || !("permissions" in navigator)) return;
+    let cancelled = false;
+    navigator.permissions
+      .query({ name: "geolocation" })
+      .then((status) => {
+        if (cancelled || status.state !== "granted") return;
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            if (cancelled) return;
+            setPassivePosition({
+              lat: pos.coords.latitude,
+              lng: pos.coords.longitude,
+            });
+          },
+          () => {},
+          // A coarse, possibly cached fix is plenty for "which spot is
+          // closest" — high accuracy would just burn battery here.
+          { enableHighAccuracy: false, timeout: 10_000, maximumAge: 300_000 }
+        );
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [checking, setChecking] = useState(false);
   const [nearMiss, setNearMiss] = useState(false);
   const watchIdRef = useRef<number | null>(null);
@@ -719,9 +794,15 @@ export default function FanPage({ slug }: { slug: string }) {
     </div>
   );
 
+  // Live position wins; the passive one covers screens before tracking
+  // starts (landing, not-yet-started) for fans who granted location before.
+  const displayPosition = position ?? passivePosition;
   const nearest = useMemo(
-    () => (position ? nearestOf(position.lat, position.lng, locations) : null),
-    [position, locations]
+    () =>
+      displayPosition
+        ? nearestOf(displayPosition.lat, displayPosition.lng, locations)
+        : null,
+    [displayPosition, locations]
   );
   const roundedDistance = nearest ? roundLiveDistance(nearest.distanceM) : null;
   const canCheckAgain =
@@ -828,6 +909,7 @@ export default function FanPage({ slug }: { slug: string }) {
 
             <LocationsCard
               locations={locations}
+              nearest={nearest}
               focusedLocationId={focusedLocationId}
               focusNonce={focusNonce}
               onFocusLocation={focusLocation}
@@ -858,6 +940,7 @@ export default function FanPage({ slug }: { slug: string }) {
 
             <LocationsCard
               locations={locations}
+              nearest={nearest}
               focusedLocationId={focusedLocationId}
               focusNonce={focusNonce}
               onFocusLocation={focusLocation}
@@ -975,6 +1058,7 @@ export default function FanPage({ slug }: { slug: string }) {
 
             <LocationsCard
               locations={locations}
+              nearest={nearest}
               focusedLocationId={focusedLocationId}
               focusNonce={focusNonce}
               onFocusLocation={focusLocation}
@@ -1130,6 +1214,7 @@ export default function FanPage({ slug }: { slug: string }) {
 
             <LocationsCard
               locations={locations}
+              nearest={nearest}
               focusedLocationId={focusedLocationId}
               focusNonce={focusNonce}
               onFocusLocation={focusLocation}
@@ -1156,6 +1241,7 @@ export default function FanPage({ slug }: { slug: string }) {
 
             <LocationsCard
               locations={locations}
+              nearest={nearest}
               focusedLocationId={focusedLocationId}
               focusNonce={focusNonce}
               onFocusLocation={focusLocation}
