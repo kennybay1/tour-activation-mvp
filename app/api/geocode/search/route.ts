@@ -22,6 +22,10 @@ type GeocodeResult = {
   // Nominatim's native order: [minLat, maxLat, minLon, maxLon].
   boundingbox: [number, number, number, number] | null;
   type: string;
+  // Only Nominatim results carry an OSM identity — postcodes.io results
+  // have neither, since a postcode isn't an OSM object.
+  osm_type: string | null;
+  osm_id: number | null;
 };
 
 type GeocodeResponse = { results: GeocodeResult[] } | { error: string };
@@ -57,6 +61,8 @@ async function tryPostcode(postcode: string): Promise<GeocodeResult[] | null> {
         lng: r.longitude,
         boundingbox: null,
         type: "postcode",
+        osm_type: null,
+        osm_id: null,
       },
     ];
   } catch {
@@ -82,6 +88,8 @@ type NominatimResult = {
   lon: string;
   boundingbox?: string[];
   type: string;
+  osm_type?: string;
+  osm_id?: number;
 };
 
 export async function GET(
@@ -210,6 +218,8 @@ export async function GET(
       ? (item.boundingbox.map(Number) as [number, number, number, number])
       : null,
     type: item.type,
+    osm_type: item.osm_type ?? null,
+    osm_id: typeof item.osm_id === "number" ? item.osm_id : null,
   }));
 
   // Only successful, parsed responses are cached — a failure must never

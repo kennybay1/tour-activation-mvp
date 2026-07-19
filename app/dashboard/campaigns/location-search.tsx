@@ -10,6 +10,8 @@ export type GeocodeResult = {
   // Nominatim's native order: [minLat, maxLat, minLon, maxLon].
   boundingbox: [number, number, number, number] | null;
   type: string;
+  osm_type: string | null;
+  osm_id: number | null;
 };
 
 type Bounds = { minLat: number; minLng: number; maxLat: number; maxLng: number };
@@ -20,9 +22,13 @@ type Bounds = { minLat: number; minLng: number; maxLat: number; maxLng: number }
 export default function LocationSearch({
   getBounds,
   onNavigate,
+  onAddHere,
 }: {
   getBounds: () => Bounds | null;
   onNavigate: (result: GeocodeResult) => void;
+  // Explicit "Add here" per result — a separate action from selecting a
+  // result, which still only ever moves the viewport (see onNavigate).
+  onAddHere: (result: GeocodeResult) => void;
 }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<GeocodeResult[] | null>(null);
@@ -77,6 +83,12 @@ export default function LocationSearch({
     setResults(null);
     setHighlighted(-1);
     setQuery(r.name || r.display_name);
+  };
+
+  const addHere = (r: GeocodeResult) => {
+    onAddHere(r);
+    setResults(null);
+    setHighlighted(-1);
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -141,22 +153,35 @@ export default function LocationSearch({
             </p>
           ) : (
             results.map((r, i) => (
-              <button
+              // A div, not a button — it holds two separate buttons
+              // (select vs. Add here), and buttons can't nest.
+              <div
                 key={`${r.name}-${r.lat}-${r.lng}-${i}`}
-                type="button"
-                onClick={() => selectResult(r)}
                 onMouseEnter={() => setHighlighted(i)}
-                className={`block w-full border-b border-ink/10 px-3 py-2 text-left last:border-b-0 ${
+                className={`flex items-stretch border-b border-ink/10 last:border-b-0 ${
                   i === highlighted ? "bg-cream-deep" : ""
                 }`}
               >
-                <p className="truncate text-xs font-medium text-ink">
-                  {r.name}
-                </p>
-                <p className="truncate text-xs text-ink/50">
-                  {r.display_name}
-                </p>
-              </button>
+                <button
+                  type="button"
+                  onClick={() => selectResult(r)}
+                  className="min-w-0 flex-1 px-3 py-2 text-left"
+                >
+                  <p className="truncate text-xs font-medium text-ink">
+                    {r.name}
+                  </p>
+                  <p className="truncate text-xs text-ink/50">
+                    {r.display_name}
+                  </p>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => addHere(r)}
+                  className="shrink-0 self-center px-2 text-xs font-medium text-forest-deep underline-offset-2 hover:underline"
+                >
+                  Add here
+                </button>
+              </div>
             ))
           )}
         </div>

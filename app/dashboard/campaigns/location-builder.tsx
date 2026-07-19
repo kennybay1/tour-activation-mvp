@@ -27,6 +27,15 @@ const LONDON: [number, number] = [51.5074, -0.1278];
 const VIEW_KEY = "moments_map_view";
 const MIN_SCAN_RADIUS = 100;
 const MAX_SCAN_RADIUS = 5000;
+// How close a commit needs to land to the last search result for its name
+// to carry over — close enough that it's clearly "that place", not a
+// coincidence of the crosshair drifting nearby.
+const SEARCH_NAME_CARRYOVER_RADIUS_M = 150;
+
+// Only Nominatim results have an OSM identity; postcodes.io ones don't.
+function externalRefForResult(r: GeocodeResult): string | null {
+  return r.osm_type && r.osm_id != null ? `osm:${r.osm_type}:${r.osm_id}` : null;
+}
 
 type GhostKiosk = {
   external_ref: string;
@@ -134,6 +143,9 @@ export default function LocationBuilder({
   const [selected, setSelected] = useState<string | null>(null);
   const [addMode, setAddMode] = useState(false);
   const didInitialFit = useRef(false);
+  // The most recent search result the user navigated to — used to carry
+  // its name/identity over onto the next commit, if it lands nearby.
+  const [lastSearchResult, setLastSearchResult] = useState<GeocodeResult | null>(null);
 
   // Preset scanner state — entirely separate from the committed
   // `locations` array until the organiser explicitly commits.
@@ -184,6 +196,7 @@ export default function LocationBuilder({
   };
 
   const navigateToResult = (result: GeocodeResult) => {
+    setLastSearchResult(result);
     const m = mapRef.current;
     if (!m) return;
     if (result.boundingbox) {
@@ -214,16 +227,51 @@ export default function LocationBuilder({
       locations.map((l) => (l.tempId === tempId ? { ...l, ...patch } : l))
     );
 
+  // Selects and gently recentres on an already-committed location, in lieu
+  // of adding a duplicate on top of it.
+  const focusExisting = (loc: BuilderLocation) => {
+    setSelected(loc.tempId);
+    mapRef.current?.panTo([loc.lat, loc.lng]);
+  };
+
   const addAt = (lat: number, lng: number) => {
     if (locations.length >= MAX_LOCATIONS) return;
+
+    // If this commit lands close to the last place the user searched for,
+    // carry its name and OSM identity over rather than falling back to an
+    // anonymous LOC-{n} — selecting a result never creates a location on
+    // its own, but this is the organiser explicitly committing a point
+    // right where they just navigated to.
+    let name = `LOC-${String(locations.length + 1).padStart(3, "0")}`;
+    let source = "manual";
+    let externalRef: string | null = null;
+    if (
+      lastSearchResult &&
+      haversineMeters(lat, lng, lastSearchResult.lat, lastSearchResult.lng) <=
+        SEARCH_NAME_CARRYOVER_RADIUS_M
+    ) {
+      name = lastSearchResult.name || lastSearchResult.display_name;
+      source = "search";
+      externalRef = externalRefForResult(lastSearchResult);
+    }
+
+    if (externalRef) {
+      const existing = locations.find((l) => l.external_ref === externalRef);
+      if (existing) {
+        focusExisting(existing);
+        return;
+      }
+    }
+
     const next: BuilderLocation = {
       tempId: makeTempId(),
-      location_name: `LOC-${String(locations.length + 1).padStart(3, "0")}`,
+      location_name: name,
       lat,
       lng,
       radius_m: DEFAULT_RADIUS_M,
       sort_order: locations.length,
-      source: "manual",
+      source,
+      external_ref: externalRef,
     };
     onChange([...locations, next]);
     setSelected(next.tempId);
@@ -234,6 +282,33 @@ export default function LocationBuilder({
     if (!m) return;
     const c = m.getCenter();
     addAt(c.lat, c.lng);
+  };
+
+  // "Add here" on a search result row — adds that exact result directly,
+  // independent of the map centre. Still a fully explicit user action;
+  // merely selecting/navigating to a result never does this on its own.
+  const addSearchResult = (result: GeocodeResult) => {
+    if (locations.length >= MAX_LOCATIONS) return;
+    const externalRef = externalRefForResult(result);
+    if (externalRef) {
+      const existing = locations.find((l) => l.external_ref === externalRef);
+      if (existing) {
+        focusExisting(existing);
+        return;
+      }
+    }
+    const next: BuilderLocation = {
+      tempId: makeTempId(),
+      location_name: result.name || result.display_name,
+      lat: result.lat,
+      lng: result.lng,
+      radius_m: DEFAULT_RADIUS_M,
+      sort_order: locations.length,
+      source: "search",
+      external_ref: externalRef,
+    };
+    onChange([...locations, next]);
+    setSelected(next.tempId);
   };
 
   const remove = (tempId: string) =>
@@ -489,7 +564,11 @@ export default function LocationBuilder({
         </div>
 
         <div className="absolute left-3 top-3 z-[1000]">
-          <LocationSearch getBounds={getMapBounds} onNavigate={navigateToResult} />
+          <LocationSearch
+            getBounds={getMapBounds}
+            onNavigate={navigateToResult}
+            onAddHere={addSearchResult}
+          />
         </div>
 
         <div className="absolute right-3 top-3 z-[1000] flex flex-col items-end gap-2">
@@ -731,6 +810,11 @@ export default function LocationBuilder({
                 {l.source === "preset:k6" && (
                   <p className="text-xs text-ink/40">
                     From phone-box scan{l.external_ref ? ` · ${l.external_ref}` : ""}
+                  </p>
+                )}
+                {l.source === "search" && (
+                  <p className="text-xs text-ink/40">
+                    From search{l.external_ref ? ` · ${l.external_ref}` : ""}
                   </p>
                 )}
               </div>
