@@ -33,6 +33,8 @@ export type LocationRowInput = {
 export const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export const RADIUS_WARN_BELOW = 150;
+export const RADIUS_STRONG_WARN_BELOW = 100;
+export const MIN_RADIUS_M = 50;
 export const DEFAULT_RADIUS_M = 200;
 
 // Turn "Test Band" + "London" into "test-band-london".
@@ -120,8 +122,8 @@ export function validateLocationRow(
   }
 
   const radius = Number(row.radius_m);
-  if (row.radius_m.trim() === "" || !Number.isInteger(radius) || radius <= 0) {
-    errors.radius_m = "Radius must be a whole number of metres.";
+  if (row.radius_m.trim() === "" || !Number.isInteger(radius) || radius < MIN_RADIUS_M) {
+    errors.radius_m = `Radius must be a whole number of at least ${MIN_RADIUS_M}m.`;
   }
 
   return errors;

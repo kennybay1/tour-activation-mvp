@@ -105,6 +105,10 @@ body {
 .moment-marker--active {
   background: var(--clay);
 }
+.moment-marker--hover {
+  background: var(--sage);
+  color: var(--forest-deep);
+}
 
 /* Ghost markers for scanned-but-uncommitted preset locations — outline
    only, no fill, so they read as obviously provisional next to the

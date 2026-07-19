@@ -7,6 +7,7 @@ import { supabase } from "@/lib/supabase";
 import {
   validateCampaignCore,
   suggestSlug,
+  MIN_RADIUS_M,
   type CampaignInput,
 } from "@/lib/campaign-schema";
 import {
@@ -102,8 +103,8 @@ function validateLocations(
       rowErrors[loc.tempId] = "Latitude must be between -90 and 90.";
     } else if (!Number.isFinite(loc.lng) || loc.lng < -180 || loc.lng > 180) {
       rowErrors[loc.tempId] = "Longitude must be between -180 and 180.";
-    } else if (!Number.isInteger(loc.radius_m) || loc.radius_m <= 0) {
-      rowErrors[loc.tempId] = "Radius must be a whole number of metres.";
+    } else if (!Number.isInteger(loc.radius_m) || loc.radius_m < MIN_RADIUS_M) {
+      rowErrors[loc.tempId] = `Radius must be a whole number of at least ${MIN_RADIUS_M}m.`;
     }
   }
   return {

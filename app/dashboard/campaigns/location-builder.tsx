@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import L from "leaflet";
 import {
   MapContainer,
@@ -12,7 +12,7 @@ import {
   useMapEvents,
 } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
-import { DEFAULT_RADIUS_M, RADIUS_WARN_BELOW } from "@/lib/campaign-schema";
+import { DEFAULT_RADIUS_M } from "@/lib/campaign-schema";
 import {
   type BuilderLocation,
   MAX_LOCATIONS,
@@ -20,6 +20,7 @@ import {
   makeTempId,
 } from "./location-types";
 import LocationSearch, { type GeocodeResult } from "./location-search";
+import LocationAccordion from "./location-accordion";
 
 export type { BuilderLocation };
 
@@ -63,13 +64,16 @@ function haversineMeters(
 }
 
 // CSS-drawn divIcon markers sidestep the bundler issue where Leaflet's
-// default image icons 404.
-function markerIcon(n: number, active: boolean): L.DivIcon {
+// default image icons 404. Selected takes precedence over hover.
+function markerIcon(n: number, selected: boolean, hovered: boolean): L.DivIcon {
+  const cls = selected
+    ? " moment-marker--active"
+    : hovered
+      ? " moment-marker--hover"
+      : "";
   return L.divIcon({
     className: "",
-    html: `<div class="moment-marker${active ? " moment-marker--active" : ""}">${String(
-      n
-    ).padStart(2, "0")}</div>`,
+    html: `<div class="moment-marker${cls}">${String(n).padStart(2, "0")}</div>`,
     iconSize: [30, 30],
     iconAnchor: [15, 15],
   });
@@ -111,20 +115,89 @@ function ViewPersist() {
   return null;
 }
 
-function ClickToPlace({
-  active,
+// While add-mode is on, clicking the map places a marker there. Otherwise,
+// clicking empty map space (a marker click stops its own event from
+// reaching here) clears the current selection.
+function MapInteractions({
+  addModeActive,
   onPlace,
+  onDeselect,
 }: {
-  active: boolean;
+  addModeActive: boolean;
   onPlace: (lat: number, lng: number) => void;
+  onDeselect: () => void;
 }) {
   useMapEvents({
     click: (e) => {
-      if (active) onPlace(e.latlng.lat, e.latlng.lng);
+      if (addModeActive) onPlace(e.latlng.lat, e.latlng.lng);
+      else onDeselect();
     },
   });
   return null;
 }
+
+type LocationMapItemProps = {
+  location: BuilderLocation;
+  index: number;
+  isSelected: boolean;
+  isHovered: boolean;
+  onSelect: (tempId: string, additive: boolean) => void;
+  onDragEnd: (tempId: string, lat: number, lng: number) => void;
+};
+
+// One marker + its geofence circle, memoized so dragging or editing one
+// location — or changing selection elsewhere — doesn't force every other
+// marker on the map to re-render. The circle live-follows its marker
+// during drag via a local ref, bypassing React entirely for that path;
+// only dragend commits to state.
+const LocationMapItem = memo(function LocationMapItem({
+  location,
+  index,
+  isSelected,
+  isHovered,
+  onSelect,
+  onDragEnd,
+}: LocationMapItemProps) {
+  const circleRef = useRef<L.Circle | null>(null);
+
+  return (
+    <>
+      <Marker
+        position={[location.lat, location.lng]}
+        draggable
+        icon={markerIcon(index + 1, isSelected, isHovered)}
+        eventHandlers={{
+          click: (e) => {
+            L.DomEvent.stopPropagation(e);
+            const oe = e.originalEvent;
+            onSelect(location.tempId, oe.metaKey || oe.ctrlKey || oe.shiftKey);
+          },
+          drag: (e) => {
+            const p = (e.target as L.Marker).getLatLng();
+            circleRef.current?.setLatLng(p);
+          },
+          dragend: (e) => {
+            const p = (e.target as L.Marker).getLatLng();
+            onDragEnd(location.tempId, p.lat, p.lng);
+          },
+        }}
+      />
+      <Circle
+        ref={(instance) => {
+          circleRef.current = instance;
+        }}
+        center={[location.lat, location.lng]}
+        radius={Math.max(location.radius_m || 1, 1)}
+        pathOptions={{
+          color: isSelected ? "#b0603a" : "#20402f",
+          weight: isSelected ? 2 : 1.5,
+          fillColor: isSelected ? "#b0603a" : "#20402f",
+          fillOpacity: isSelected ? 0.12 : 0.06,
+        }}
+      />
+    </>
+  );
+});
 
 export default function LocationBuilder({
   locations,
@@ -136,16 +209,42 @@ export default function LocationBuilder({
   rowErrors: Record<string, string>;
 }) {
   const mapRef = useRef<L.Map | null>(null);
-  // Circles are moved imperatively while a marker is actively being
-  // dragged, bypassing React entirely for that 60fps-ish path. Only
-  // dragend commits to React state — see the note by the Marker below.
-  const circleRefs = useRef<Record<string, L.Circle | null>>({});
-  const [selected, setSelected] = useState<string | null>(null);
-  const [addMode, setAddMode] = useState(false);
   const didInitialFit = useRef(false);
   // The most recent search result the user navigated to — used to carry
   // its name/identity over onto the next commit, if it lands nearby.
   const [lastSearchResult, setLastSearchResult] = useState<GeocodeResult | null>(null);
+
+  // selectedIds doubles as "expanded" — a location is expanded in the
+  // accordion exactly when it's selected, so the map and the list always
+  // agree on what's active. focusedId is the most recent single item to
+  // become active, purely to drive scroll/pan; hoveredId is lighter still
+  // (marker highlight only, never pans).
+  //
+  // focusNonce always increments alongside focusedId, even when the id is
+  // unchanged (e.g. re-clicking an already-expanded row after manually
+  // panning the map away). Effects key off the nonce, not the id, so
+  // "focus this again" reliably re-triggers the pan/scroll — an id-only
+  // dependency would bail out on a same-value update, per React's usual
+  // effect semantics, and the map just wouldn't move back.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [focusedId, setFocusedId] = useState<string | null>(null);
+  const [focusNonce, setFocusNonce] = useState(0);
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [addMode, setAddMode] = useState(false);
+
+  const focusOn = useCallback((tempId: string | null) => {
+    setFocusedId(tempId);
+    setFocusNonce((n) => n + 1);
+  }, []);
+
+  // Ref mirrors of state let stable (useCallback, empty-dep) handlers read
+  // the latest values without their own identity changing on every edit —
+  // that identity stability is what lets LocationMapItem and LocationRow
+  // actually skip re-rendering via memo.
+  const locationsRef = useRef(locations);
+  locationsRef.current = locations;
+  const selectedIdsRef = useRef(selectedIds);
+  selectedIdsRef.current = selectedIds;
 
   // Preset scanner state — entirely separate from the committed
   // `locations` array until the organiser explicitly commits.
@@ -222,17 +321,92 @@ export default function LocationBuilder({
     }
   };
 
-  const update = (tempId: string, patch: Partial<BuilderLocation>) =>
-    onChange(
-      locations.map((l) => (l.tempId === tempId ? { ...l, ...patch } : l))
-    );
+  const update = useCallback(
+    (tempId: string, patch: Partial<BuilderLocation>) =>
+      onChange(
+        locationsRef.current.map((l) =>
+          l.tempId === tempId ? { ...l, ...patch } : l
+        )
+      ),
+    [onChange]
+  );
+
+  // Exclusive select — a plain marker click or a fresh add/focus.
+  const selectOnly = useCallback(
+    (tempId: string) => {
+      setSelectedIds(new Set([tempId]));
+      focusOn(tempId);
+    },
+    [focusOn]
+  );
+
+  // Additive toggle — modifier-click on a marker, or clicking a row's own
+  // disclosure header (which independently toggles per bullet 1, no
+  // modifier needed there). Always re-focuses the toggled row; if it was
+  // already in view (e.g. the row was just clicked directly), the
+  // resulting pan/scroll are no-ops.
+  const toggleSelect = useCallback(
+    (tempId: string) => {
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(tempId)) next.delete(tempId);
+        else next.add(tempId);
+        return next;
+      });
+      focusOn(tempId);
+    },
+    [focusOn]
+  );
+
+  const clearSelection = useCallback(() => {
+    setSelectedIds(new Set());
+    focusOn(null);
+  }, [focusOn]);
+
+  const focusRow = focusOn;
+  const setHovered = useCallback((tempId: string | null) => setHoveredId(tempId), []);
+
+  const expandAll = useCallback(() => {
+    setSelectedIds(new Set(locationsRef.current.map((l) => l.tempId)));
+  }, []);
+  const collapseAll = useCallback(() => {
+    setSelectedIds(new Set());
+    focusOn(null);
+  }, [focusOn]);
+
+  const onMarkerSelect = useCallback(
+    (tempId: string, additive: boolean) => {
+      if (additive) toggleSelect(tempId);
+      else selectOnly(tempId);
+    },
+    [toggleSelect, selectOnly]
+  );
+
+  const onMarkerDragEnd = useCallback(
+    (tempId: string, lat: number, lng: number) => update(tempId, { lat, lng }),
+    [update]
+  );
 
   // Selects and gently recentres on an already-committed location, in lieu
   // of adding a duplicate on top of it.
   const focusExisting = (loc: BuilderLocation) => {
-    setSelected(loc.tempId);
-    mapRef.current?.panTo([loc.lat, loc.lng]);
+    selectOnly(loc.tempId);
   };
+
+  // Pan (but never zoom) to the focused location if it's off-screen —
+  // covers both "expanding/focusing a row" from the accordion and
+  // re-selecting via the map itself, where the bounds check naturally
+  // no-ops since the marker just got clicked. Keyed on the nonce, not the
+  // id, so re-focusing the same row after the map has drifted away still
+  // pans back — see the note by focusNonce above.
+  useEffect(() => {
+    if (!focusedId) return;
+    const loc = locationsRef.current.find((l) => l.tempId === focusedId);
+    const m = mapRef.current;
+    if (!loc || !m) return;
+    const pt = L.latLng(loc.lat, loc.lng);
+    if (!m.getBounds().contains(pt)) m.panTo(pt);
+  }, [focusNonce, focusedId]);
 
   const addAt = (lat: number, lng: number) => {
     if (locations.length >= MAX_LOCATIONS) return;
@@ -274,7 +448,7 @@ export default function LocationBuilder({
       external_ref: externalRef,
     };
     onChange([...locations, next]);
-    setSelected(next.tempId);
+    selectOnly(next.tempId);
   };
 
   const addAtCentre = () => {
@@ -308,15 +482,48 @@ export default function LocationBuilder({
       external_ref: externalRef,
     };
     onChange([...locations, next]);
-    setSelected(next.tempId);
+    selectOnly(next.tempId);
   };
 
-  const remove = (tempId: string) =>
-    onChange(
-      locations
-        .filter((l) => l.tempId !== tempId)
-        .map((l, i) => ({ ...l, sort_order: i }))
-    );
+  const remove = useCallback(
+    (tempId: string) => {
+      onChange(
+        locationsRef.current
+          .filter((l) => l.tempId !== tempId)
+          .map((l, i) => ({ ...l, sort_order: i }))
+      );
+      setSelectedIds((prev) => {
+        if (!prev.has(tempId)) return prev;
+        const next = new Set(prev);
+        next.delete(tempId);
+        return next;
+      });
+    },
+    [onChange]
+  );
+
+  const removeSelected = useCallback(() => {
+    setSelectedIds((toRemove) => {
+      onChange(
+        locationsRef.current
+          .filter((l) => !toRemove.has(l.tempId))
+          .map((l, i) => ({ ...l, sort_order: i }))
+      );
+      return new Set();
+    });
+    focusOn(null);
+  }, [onChange, focusOn]);
+
+  const setRadiusSelected = useCallback(
+    (radius: number) => {
+      onChange(
+        locationsRef.current.map((l) =>
+          selectedIdsRef.current.has(l.tempId) ? { ...l, radius_m: radius } : l
+        )
+      );
+    },
+    [onChange]
+  );
 
   const overlapping = useMemo(() => {
     const set = new Set<string>();
@@ -475,46 +682,21 @@ export default function LocationBuilder({
           <ZoomControl position="bottomleft" />
           <MapReady onReady={onMapReady} />
           <ViewPersist />
-          <ClickToPlace active={addMode && !atCap} onPlace={addAt} />
+          <MapInteractions
+            addModeActive={addMode && !atCap}
+            onPlace={addAt}
+            onDeselect={clearSelection}
+          />
 
           {locations.map((l, i) => (
-            <Marker
+            <LocationMapItem
               key={l.tempId}
-              position={[l.lat, l.lng]}
-              draggable
-              icon={markerIcon(i + 1, selected === l.tempId)}
-              eventHandlers={{
-                click: () => setSelected(l.tempId),
-                // Live-follow the circle without touching React state —
-                // committing to state on every drag tick was enough
-                // re-render pressure to destabilize Leaflet's SVG
-                // renderer mid-drag. dragend is the single source of
-                // truth, matching the spec.
-                drag: (e) => {
-                  const p = (e.target as L.Marker).getLatLng();
-                  circleRefs.current[l.tempId]?.setLatLng(p);
-                },
-                dragend: (e) => {
-                  const p = (e.target as L.Marker).getLatLng();
-                  update(l.tempId, { lat: p.lat, lng: p.lng });
-                },
-              }}
-            />
-          ))}
-          {locations.map((l) => (
-            <Circle
-              key={`c-${l.tempId}`}
-              ref={(instance) => {
-                circleRefs.current[l.tempId] = instance;
-              }}
-              center={[l.lat, l.lng]}
-              radius={Math.max(l.radius_m || 1, 1)}
-              pathOptions={{
-                color: selected === l.tempId ? "#b0603a" : "#20402f",
-                weight: 1.5,
-                fillColor: selected === l.tempId ? "#b0603a" : "#20402f",
-                fillOpacity: 0.06,
-              }}
+              location={l}
+              index={i}
+              isSelected={selectedIds.has(l.tempId)}
+              isHovered={hoveredId === l.tempId}
+              onSelect={onMarkerSelect}
+              onDragEnd={onMarkerDragEnd}
             />
           ))}
 
@@ -738,90 +920,23 @@ export default function LocationBuilder({
         </p>
       )}
 
-      {locations.length === 0 ? (
-        <p className="mt-3 border-y border-ink/25 py-4 text-sm text-ink/50">
-          No locations yet — add one with the controls on the map.
-        </p>
-      ) : (
-        <div className="mt-3 divide-y divide-ink/15 border-y border-ink/25">
-          {locations.map((l, i) => (
-            <div
-              key={l.tempId}
-              onMouseEnter={() => setSelected(l.tempId)}
-              onClick={() => setSelected(l.tempId)}
-              className={`flex flex-wrap items-center gap-3 px-2 py-3 text-sm transition ${
-                selected === l.tempId ? "bg-cream-deep/60" : ""
-              }`}
-            >
-              <span className="w-14 shrink-0 font-mono text-xs text-clay">
-                LOC-{String(i + 1).padStart(3, "0")}
-              </span>
-              <input
-                value={l.location_name}
-                onChange={(e) =>
-                  update(l.tempId, { location_name: e.target.value })
-                }
-                placeholder="Name this spot"
-                className="min-w-[10rem] flex-1 rounded-lg border border-ink/20 bg-transparent px-3 py-1.5 text-sm text-ink placeholder-ink/30 outline-none focus:border-forest"
-              />
-              <span className="shrink-0 font-mono text-xs text-ink/50">
-                {l.lat.toFixed(5)}, {l.lng.toFixed(5)}
-              </span>
-              <label className="flex shrink-0 items-center gap-1.5 font-mono text-xs text-ink/50">
-                <input
-                  inputMode="numeric"
-                  value={String(l.radius_m)}
-                  onChange={(e) =>
-                    update(l.tempId, {
-                      radius_m: Number(e.target.value.replace(/[^0-9]/g, "")) || 0,
-                    })
-                  }
-                  className="w-16 rounded-lg border border-ink/20 bg-transparent px-2 py-1.5 text-right text-sm text-ink outline-none focus:border-forest"
-                />
-                m
-              </label>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  remove(l.tempId);
-                }}
-                className="shrink-0 rounded-full border border-ink/30 px-3 py-1 text-xs font-medium text-ink/60 transition hover:border-ink/60"
-              >
-                Remove
-              </button>
-              <div className="flex w-full flex-col gap-0.5 pl-14">
-                {rowErrors[l.tempId] && (
-                  <p className="text-xs font-medium text-clay">
-                    {rowErrors[l.tempId]}
-                  </p>
-                )}
-                {l.radius_m > 0 && l.radius_m < RADIUS_WARN_BELOW && (
-                  <p className="text-xs text-clay/90">
-                    Below {RADIUS_WARN_BELOW}m — GPS accuracy in dense urban
-                    areas may prevent genuine fans from unlocking.
-                  </p>
-                )}
-                {overlapping.has(l.tempId) && (
-                  <p className="text-xs text-ink/50">
-                    Overlaps another circle — nearest wins.
-                  </p>
-                )}
-                {l.source === "preset:k6" && (
-                  <p className="text-xs text-ink/40">
-                    From phone-box scan{l.external_ref ? ` · ${l.external_ref}` : ""}
-                  </p>
-                )}
-                {l.source === "search" && (
-                  <p className="text-xs text-ink/40">
-                    From search{l.external_ref ? ` · ${l.external_ref}` : ""}
-                  </p>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+      <LocationAccordion
+        locations={locations}
+        selectedIds={selectedIds}
+        focusedId={focusedId}
+        focusNonce={focusNonce}
+        rowErrors={rowErrors}
+        overlapping={overlapping}
+        onToggleExpand={toggleSelect}
+        onFocusRow={focusRow}
+        onHover={setHovered}
+        onUpdate={update}
+        onRemove={remove}
+        onExpandAll={expandAll}
+        onCollapseAll={collapseAll}
+        onSetRadiusSelected={setRadiusSelected}
+        onRemoveSelected={removeSelected}
+      />
     </div>
   );
 }
