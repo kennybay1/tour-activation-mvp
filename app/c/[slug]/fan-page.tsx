@@ -1,10 +1,12 @@
 "use client";
 
-import { Component, useCallback, useEffect, useRef, useState } from "react";
+import { Component, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { supabase } from "@/lib/supabase";
 import { directionsUrlFor } from "./directions";
 import { FAN_MAP_HEIGHT } from "./fan-map-constants";
+import { formatCountdown, useClockOffsetMs, useCorrectedNow } from "./countdown";
+import { haversineMeters, roundLiveDistance } from "./geo";
 
 // Leaflet touches window/document at import time (browser-only), and this
 // page is the top of the conversion funnel on mobile data — the tile
@@ -60,6 +62,7 @@ type SpotLocation = {
   location_name: string;
   lat: number;
   lng: number;
+  radius_m: number;
 };
 
 type Reward = {
@@ -72,6 +75,7 @@ type Reward = {
 type Step =
   | "loading"
   | "not_found"
+  | "not_yet_started"
   | "landing"
   | "register"
   | "locating"
@@ -83,6 +87,7 @@ type Step =
   | "rate_limited";
 
 const SESSION_KEY = "ta_session_id";
+const CLAIM_DEBOUNCE_MS = 15_000;
 
 function getSessionId(): string {
   try {
@@ -110,6 +115,108 @@ function mediaKind(url: string): "audio" | "video" | "image" {
   return "image";
 }
 
+function nearestOf(
+  lat: number,
+  lng: number,
+  locations: SpotLocation[]
+): { location: SpotLocation; distanceM: number } | null {
+  if (!locations.length) return null;
+  let best = locations[0];
+  let bestDist = Infinity;
+  for (const l of locations) {
+    const d = haversineMeters(lat, lng, l.lat, l.lng);
+    if (d < bestDist) {
+      bestDist = d;
+      best = l;
+    }
+  }
+  return { location: best, distanceM: bestDist };
+}
+
+const primaryBtn =
+  "w-full rounded-full bg-forest-deep py-4 text-lg font-semibold text-parchment transition active:scale-[0.98] disabled:opacity-50";
+const ticketBtn =
+  "w-full rounded-full bg-clay py-4 text-lg font-bold text-cream transition active:scale-[0.98]";
+const eyebrow = "text-xs font-medium uppercase tracking-[0.3em] text-clay";
+
+function CountdownLine({ label, msRemaining }: { label: string; msRemaining: number }) {
+  return (
+    <p className="mt-2 font-mono text-xs text-ink/50">
+      {label}{" "}
+      <span className="font-medium text-clay">{formatCountdown(msRemaining)}</span>
+    </p>
+  );
+}
+
+function RewardTeaserCard({ teaser }: { teaser: string }) {
+  return (
+    <div className="rounded-2xl bg-forest p-5 text-parchment">
+      <div className="rounded-xl border border-parchment/25 p-4">
+        <p className="text-xs font-medium uppercase tracking-[0.3em] text-sage">
+          The reward
+        </p>
+        <p className="mt-2 font-serif text-2xl leading-snug">{teaser}</p>
+      </div>
+    </div>
+  );
+}
+
+function LocationsCard({
+  locations,
+  focusedLocationId,
+  focusNonce,
+  onFocusLocation,
+}: {
+  locations: SpotLocation[];
+  focusedLocationId: string | null;
+  focusNonce: number;
+  onFocusLocation: (id: string) => void;
+}) {
+  return (
+    <div className="rounded-2xl border border-ink/25 p-5">
+      <p className="text-xs font-medium uppercase tracking-[0.3em] text-ink/50">
+        {locations.length > 1 ? "The spots" : "The spot"}
+      </p>
+      {locations.length > 1 && (
+        <p className="mt-2 text-sm text-ink/70">
+          Unlock at any of {locations.length} locations.
+        </p>
+      )}
+      <ul className="mt-2 space-y-4">
+        {locations.map((l) => (
+          <li key={l.id} className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => onFocusLocation(l.id)}
+              className="min-w-0 flex-1 text-left"
+            >
+              <p className="text-lg font-medium">{l.location_name}</p>
+            </button>
+            <a
+              href={directionsUrlFor(l)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="shrink-0 rounded-full border border-clay/60 px-4 py-2 text-sm font-medium text-clay transition active:scale-[0.98]"
+            >
+              Directions
+            </a>
+          </li>
+        ))}
+      </ul>
+
+      <div className="mt-4">
+        <MapErrorBoundary>
+          <FanMap
+            locations={locations}
+            focusedId={focusedLocationId}
+            focusNonce={focusNonce}
+          />
+        </MapErrorBoundary>
+      </div>
+    </div>
+  );
+}
+
 export default function FanPage({ slug }: { slug: string }) {
   const [step, setStep] = useState<Step>("loading");
   const [campaign, setCampaign] = useState<Campaign | null>(null);
@@ -117,12 +224,16 @@ export default function FanPage({ slug }: { slug: string }) {
   const [email, setEmail] = useState("");
   const [consent, setConsent] = useState(false);
   const [reward, setReward] = useState<Reward | null>(null);
-  const [distance, setDistance] = useState<number | null>(null);
-  const [nearestLocationName, setNearestLocationName] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [inApp, setInApp] = useState(false);
   const sessionRef = useRef<string>("");
   const viewTracked = useRef(false);
+
+  // Countdown — every screen's "now" is corrected for client clock skew.
+  const clockOffsetMs = useClockOffsetMs();
+  const now = useCorrectedNow(clockOffsetMs, !!campaign);
+  const startsAtMs = campaign ? new Date(campaign.starts_at).getTime() : 0;
+  const endsAtMs = campaign ? new Date(campaign.ends_at).getTime() : 0;
 
   // Tapping a location in the list opens that marker's popup on the map.
   // The nonce always increments alongside the id, even when re-tapping the
@@ -134,6 +245,22 @@ export default function FanPage({ slug }: { slug: string }) {
     setFocusedLocationId(id);
     setFocusNonce((n) => n + 1);
   }, []);
+
+  // Live tracking. `position` drives the on-screen distance and updates on
+  // every watchPosition callback; the server is only ever consulted per the
+  // gated, debounced rules in attemptClaim below — never polled per tick.
+  const [position, setPosition] = useState<{
+    lat: number;
+    lng: number;
+    accuracy: number;
+  } | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [nearMiss, setNearMiss] = useState(false);
+  const watchIdRef = useRef<number | null>(null);
+  const firstFixHandledRef = useRef(false);
+  const lastClaimAttemptAtRef = useRef(0);
+  const locationsRef = useRef(locations);
+  locationsRef.current = locations;
 
   const track = useCallback(
     (event_type: string, metadata?: Record<string, unknown>) => {
@@ -152,6 +279,7 @@ export default function FanPage({ slug }: { slug: string }) {
     [slug]
   );
 
+  // ── Initial campaign load ───────────────────────────────────────────
   useEffect(() => {
     sessionRef.current = getSessionId();
     setInApp(isInAppBrowser());
@@ -170,22 +298,18 @@ export default function FanPage({ slug }: { slug: string }) {
         const c = data as Campaign;
         const { data: locs } = await supabase
           .from("campaign_locations_public")
-          .select("id, location_name, lat, lng")
+          .select("id, location_name, lat, lng, radius_m")
           .eq("campaign_id", c.id)
           .order("sort_order");
         if (cancelled) return;
         setCampaign(c);
         setLocations((locs as SpotLocation[]) ?? []);
-        const now = new Date();
-        if (
-          !c.is_active ||
-          now < new Date(c.starts_at) ||
-          now > new Date(c.ends_at) ||
-          !locs?.length
-        ) {
+        // Active/has-locations are structural, not time-based — everything
+        // date-related (not-yet-started / landing / expired) is decided
+        // reactively below, against corrected time, and self-corrects the
+        // instant the real clock offset loads.
+        if (!c.is_active || !locs?.length) {
           setStep("expired");
-        } else {
-          setStep("landing");
         }
         if (!viewTracked.current) {
           viewTracked.current = true;
@@ -197,8 +321,25 @@ export default function FanPage({ slug }: { slug: string }) {
     };
   }, [slug, track]);
 
-  const submitClaim = useCallback(
-    async (lat: number, lng: number, accuracy: number) => {
+  // ── Stop/start the geolocation watcher ──────────────────────────────
+  const stopWatching = useCallback(() => {
+    if (watchIdRef.current != null) {
+      navigator.geolocation.clearWatch(watchIdRef.current);
+      watchIdRef.current = null;
+    }
+  }, []);
+
+  const attemptClaim = useCallback(
+    async (
+      lat: number,
+      lng: number,
+      accuracy: number,
+      expectedInRange: boolean
+    ) => {
+      const nowMs = Date.now();
+      if (nowMs - lastClaimAttemptAtRef.current < CLAIM_DEBOUNCE_MS) return;
+      lastClaimAttemptAtRef.current = nowMs;
+      setChecking(true);
       try {
         const res = await fetch("/api/claim", {
           method: "POST",
@@ -214,62 +355,140 @@ export default function FanPage({ slug }: { slug: string }) {
           }),
         });
         if (res.status === 429) {
+          stopWatching();
           setStep("rate_limited");
           return;
         }
         const json = await res.json();
         if (json.status === "unlocked" || json.status === "already_claimed") {
+          stopWatching();
+          setNearMiss(false);
           setReward(json);
           setStep("unlocked");
         } else if (json.status === "out_of_range") {
-          setDistance(Math.max(50, Math.round(json.distance_m / 50) * 50));
-          setNearestLocationName(json.nearest_location_name ?? null);
-          setStep("locked");
+          // A near miss is specifically when the client's own check thought
+          // this attempt would succeed — the server's accuracy grace can
+          // differ. A plain "still far away" reading from the unconditional
+          // first-fix or manual check is not a near miss.
+          setNearMiss(expectedInRange);
+          setStep((s) => (s === "locating" ? "locked" : s));
         } else if (json.status === "expired") {
+          stopWatching();
           setStep("expired");
-        } else {
-          setStep("location_error");
         }
+        // Any other/unrecognised response is treated as a transient hiccup
+        // on this one attempt — stay put, keep watching, don't tear the
+        // live-tracking screen down over a single bad request.
       } catch {
-        setStep("location_error");
+        // Network hiccup on this one attempt — same reasoning.
+      } finally {
+        setChecking(false);
       }
     },
-    [slug, email, consent]
+    [slug, email, consent, stopWatching]
   );
 
-  const runGeolocation = useCallback(() => {
-    setStep("locating");
+  const onPosition = useCallback(
+    (pos: GeolocationPosition) => {
+      const lat = pos.coords.latitude;
+      const lng = pos.coords.longitude;
+      const accuracy = pos.coords.accuracy;
+      setPosition({ lat, lng, accuracy });
+      setStep((s) => (s === "locating" ? "locked" : s));
+
+      const nearest = nearestOf(lat, lng, locationsRef.current);
+      const inRange = !!nearest && nearest.distanceM <= nearest.location.radius_m;
+
+      if (!firstFixHandledRef.current) {
+        firstFixHandledRef.current = true;
+        track("permission_granted");
+        attemptClaim(lat, lng, accuracy, inRange);
+      } else if (inRange) {
+        attemptClaim(lat, lng, accuracy, true);
+      }
+    },
+    [attemptClaim, track]
+  );
+
+  const startWatching = useCallback(() => {
     if (!("geolocation" in navigator)) {
       track("location_error", { reason: "unsupported" });
       setStep("location_error");
       return;
     }
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        track("permission_granted");
-        submitClaim(
-          pos.coords.latitude,
-          pos.coords.longitude,
-          pos.coords.accuracy
-        );
-      },
+    if (watchIdRef.current != null) return;
+    watchIdRef.current = navigator.geolocation.watchPosition(
+      onPosition,
       (err) => {
         if (err.code === err.PERMISSION_DENIED) {
+          stopWatching();
           track("permission_denied");
           setStep("permission_denied");
-        } else {
+        } else if (!firstFixHandledRef.current) {
+          // No fix has ever landed — treat like the original one-shot flow.
+          stopWatching();
           track("location_error", { code: err.code });
           setStep("location_error");
         }
+        // Once tracking is already live, a transient error (signal blip,
+        // one timed-out attempt) shouldn't tear the whole screen down —
+        // watchPosition keeps trying on its own.
       },
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+      { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 }
     );
-  }, [track, submitClaim]);
+  }, [onPosition, track, stopWatching]);
+
+  const beginTracking = () => {
+    setStep("locating");
+    startWatching();
+  };
+
+  const checkAgain = useCallback(() => {
+    if (!position) return;
+    const nearest = nearestOf(position.lat, position.lng, locationsRef.current);
+    const inRange = !!nearest && nearest.distanceM <= nearest.location.radius_m;
+    attemptClaim(position.lat, position.lng, position.accuracy, inRange);
+  }, [position, attemptClaim]);
+
+  // ── Battery/lifecycle: item 7 ────────────────────────────────────────
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.hidden) {
+        stopWatching();
+      } else if (
+        (step === "locating" || step === "locked") &&
+        watchIdRef.current == null
+      ) {
+        startWatching();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [step, stopWatching, startWatching]);
+
+  useEffect(() => stopWatching, [stopWatching]);
+
+  // ── Clock-driven transitions: not-yet-started / landing / expired ──
+  useEffect(() => {
+    if (!campaign) return;
+    if (now > endsAtMs) {
+      if (!["unlocked", "expired", "not_found", "rate_limited"].includes(step)) {
+        stopWatching();
+        setStep("expired");
+      }
+      return;
+    }
+    if (now < startsAtMs) {
+      if (step === "loading" || step === "landing") setStep("not_yet_started");
+      return;
+    }
+    if (step === "loading" || step === "not_yet_started") setStep("landing");
+  }, [now, campaign, endsAtMs, startsAtMs, step, stopWatching]);
 
   const onRegister = (e: React.FormEvent) => {
     e.preventDefault();
     track("register", { marketing_consent: consent });
-    runGeolocation();
+    beginTracking();
   };
 
   const copyCode = async () => {
@@ -293,8 +512,13 @@ export default function FanPage({ slug }: { slug: string }) {
     </div>
   );
 
-  const primaryBtn =
-    "w-full rounded-full bg-forest-deep py-4 text-lg font-semibold text-parchment transition active:scale-[0.98]";
+  const nearest = useMemo(
+    () => (position ? nearestOf(position.lat, position.lng, locations) : null),
+    [position, locations]
+  );
+  const roundedDistance = nearest ? roundLiveDistance(nearest.distanceM) : null;
+  const canCheckAgain =
+    !checking && Date.now() - lastClaimAttemptAtRef.current >= CLAIM_DEBOUNCE_MS;
 
   return (
     <div className="grain min-h-dvh bg-cream font-sans text-ink">
@@ -321,25 +545,64 @@ export default function FanPage({ slug }: { slug: string }) {
 
         {step === "expired" && campaign && (
           <Center>
-            <p className="text-xs font-medium uppercase tracking-[0.3em] text-clay">
-              {campaign.artist_name}
-            </p>
+            <p className={eyebrow}>{campaign.artist_name}</p>
             <h1 className="mt-4 font-serif text-4xl">This drop has ended</h1>
             <p className="mt-3 text-ink/60">
               Follow {campaign.artist_name} to catch the next one.
             </p>
+            <button
+              onClick={() => {
+                track("ticket_click");
+                window.open(campaign.ticket_url, "_blank", "noopener");
+              }}
+              className={`mt-8 ${ticketBtn}`}
+            >
+              Get tickets
+            </button>
           </Center>
+        )}
+
+        {step === "not_yet_started" && campaign && (
+          <div className="fade-up flex flex-1 flex-col gap-6">
+            <div className="mt-2">
+              <p className={eyebrow}>{campaign.artist_name}</p>
+              <h1 className="mt-4 font-serif text-[2.6rem] leading-[1.06]">
+                {campaign.title}
+              </h1>
+            </div>
+
+            <div className="rounded-2xl border border-ink/25 p-6 text-center">
+              <p className="text-xs font-medium uppercase tracking-[0.3em] text-ink/50">
+                Opens in
+              </p>
+              <p className="mt-2 font-mono text-3xl text-clay">
+                {formatCountdown(startsAtMs - now)}
+              </p>
+            </div>
+
+            {campaign.reward_teaser && (
+              <RewardTeaserCard teaser={campaign.reward_teaser} />
+            )}
+
+            <LocationsCard
+              locations={locations}
+              focusedLocationId={focusedLocationId}
+              focusNonce={focusNonce}
+              onFocusLocation={focusLocation}
+            />
+
+            {inAppBanner}
+          </div>
         )}
 
         {step === "landing" && campaign && (
           <div className="fade-up flex flex-1 flex-col gap-6">
             <div className="mt-2">
-              <p className="text-xs font-medium uppercase tracking-[0.3em] text-clay">
-                {campaign.artist_name}
-              </p>
+              <p className={eyebrow}>{campaign.artist_name}</p>
               <h1 className="mt-4 font-serif text-[2.6rem] leading-[1.06]">
                 {campaign.title}
               </h1>
+              <CountdownLine label="Ends in" msRemaining={endsAtMs - now} />
               {campaign.description && (
                 <p className="mt-4 text-lg leading-relaxed text-ink/70">
                   {campaign.description}
@@ -348,59 +611,15 @@ export default function FanPage({ slug }: { slug: string }) {
             </div>
 
             {campaign.reward_teaser && (
-              <div className="rounded-2xl bg-forest p-5 text-parchment">
-                <div className="rounded-xl border border-parchment/25 p-4">
-                  <p className="text-xs font-medium uppercase tracking-[0.3em] text-sage">
-                    The reward
-                  </p>
-                  <p className="mt-2 font-serif text-2xl leading-snug">
-                    {campaign.reward_teaser}
-                  </p>
-                </div>
-              </div>
+              <RewardTeaserCard teaser={campaign.reward_teaser} />
             )}
 
-            <div className="rounded-2xl border border-ink/25 p-5">
-              <p className="text-xs font-medium uppercase tracking-[0.3em] text-ink/50">
-                {locations.length > 1 ? "The spots" : "The spot"}
-              </p>
-              {locations.length > 1 && (
-                <p className="mt-2 text-sm text-ink/70">
-                  Unlock at any of {locations.length} locations.
-                </p>
-              )}
-              <ul className="mt-2 space-y-4">
-                {locations.map((l) => (
-                  <li key={l.id} className="flex items-center gap-3">
-                    <button
-                      type="button"
-                      onClick={() => focusLocation(l.id)}
-                      className="min-w-0 flex-1 text-left"
-                    >
-                      <p className="text-lg font-medium">{l.location_name}</p>
-                    </button>
-                    <a
-                      href={directionsUrlFor(l)}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="shrink-0 rounded-full border border-clay/60 px-4 py-2 text-sm font-medium text-clay transition active:scale-[0.98]"
-                    >
-                      Directions
-                    </a>
-                  </li>
-                ))}
-              </ul>
-
-              <div className="mt-4">
-                <MapErrorBoundary>
-                  <FanMap
-                    locations={locations}
-                    focusedId={focusedLocationId}
-                    focusNonce={focusNonce}
-                  />
-                </MapErrorBoundary>
-              </div>
-            </div>
+            <LocationsCard
+              locations={locations}
+              focusedLocationId={focusedLocationId}
+              focusNonce={focusNonce}
+              onFocusLocation={focusLocation}
+            />
 
             <div className="divide-y divide-ink/15 border-y border-ink/25">
               {[
@@ -431,10 +650,9 @@ export default function FanPage({ slug }: { slug: string }) {
             className="fade-up flex flex-1 flex-col gap-6"
           >
             <div className="mt-2">
-              <p className="text-xs font-medium uppercase tracking-[0.3em] text-clay">
-                {campaign.artist_name}
-              </p>
+              <p className={eyebrow}>{campaign.artist_name}</p>
               <h1 className="mt-4 font-serif text-4xl">Almost there</h1>
+              <CountdownLine label="Ends in" msRemaining={endsAtMs - now} />
               <p className="mt-3 text-ink/60">
                 Drop your email so we can let you in.
               </p>
@@ -518,75 +736,93 @@ export default function FanPage({ slug }: { slug: string }) {
                 : locations[0]?.location_name}
               . This can take a few seconds.
             </p>
+            <CountdownLine label="Ends in" msRemaining={endsAtMs - now} />
           </Center>
         )}
 
         {step === "locked" && campaign && (
-          <Center>
-            <div className="relative flex h-60 w-60 items-center justify-center">
-              <span className="absolute inset-0 rounded-full border border-forest/25" />
-              <span className="absolute inset-[15%] rounded-full border border-forest/40" />
-              <span className="absolute inset-[30%] rounded-full border border-forest/60" />
-              <div className="text-center">
-                <p className="font-mono text-xl text-forest">
-                  ~{distance} m
+          <div className="fade-up flex flex-1 flex-col gap-6">
+            <div className="mt-2 text-center">
+              <p className={eyebrow}>{campaign.artist_name}</p>
+              <h1 className="mt-4 font-serif text-3xl">
+                {campaign.title}
+              </h1>
+            </div>
+
+            <div className="flex items-center justify-center gap-4">
+              <div className="relative flex h-40 w-40 shrink-0 items-center justify-center">
+                <span className="absolute inset-0 rounded-full border border-forest/25" />
+                <span className="absolute inset-[15%] rounded-full border border-forest/40" />
+                <span className="absolute inset-[30%] rounded-full border border-forest/60" />
+                <div className="text-center">
+                  <p className="font-mono text-lg text-forest">
+                    {roundedDistance != null ? `~${roundedDistance}m` : "—"}
+                  </p>
+                  <p className="mt-1 text-[9px] uppercase tracking-[0.2em] text-ink/50">
+                    to {nearest?.location.location_name ?? "go"}
+                  </p>
+                </div>
+              </div>
+              <div className="flex h-40 w-32 shrink-0 flex-col items-center justify-center rounded-2xl border border-ink/20 text-center">
+                <p className="font-mono text-lg text-clay">
+                  {formatCountdown(endsAtMs - now)}
                 </p>
-                <p className="mt-1 text-[10px] uppercase tracking-[0.25em] text-ink/50">
-                  to go
+                <p className="mt-1 text-[9px] uppercase tracking-[0.2em] text-ink/50">
+                  time left
                 </p>
               </div>
             </div>
-            <h1 className="mt-4 font-serif text-3xl">Not quite there yet</h1>
-            <p className="mt-2 text-ink/60">
-              {locations.length > 1
-                ? `You're about ${distance}m from ${nearestLocationName ?? "the nearest spot"}.`
-                : `The drop unlocks at ${locations[0]?.location_name}.`}
-            </p>
-            {locations.length > 1 ? (
-              <>
-                <p className="mt-1 text-sm text-ink/50">
-                  The drop unlocks at any of these:
-                </p>
-                <ul className="mt-3 space-y-1 text-sm">
-                  {locations.map((l) => (
-                    <li key={l.id}>
-                      <a
-                        href={directionsUrlFor(l)}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="font-medium text-clay underline underline-offset-4"
-                      >
-                        {l.location_name} — Directions
-                      </a>
-                    </li>
-                  ))}
-                </ul>
-              </>
-            ) : (
-              locations[0] && (
-                <a
-                  href={directionsUrlFor(locations[0])}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="mt-3 text-sm font-medium text-clay underline underline-offset-4"
-                >
-                  Directions
-                </a>
-              )
+
+            <div className="text-center">
+              {nearMiss ? (
+                <>
+                  <h2 className="font-serif text-2xl">So close!</h2>
+                  <p className="mt-2 text-ink/60">
+                    You&apos;re right at the edge — move a few metres and
+                    we&apos;ll pick it up.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <h2 className="font-serif text-2xl">Not quite there yet</h2>
+                  <p className="mt-2 text-ink/60">
+                    {roundedDistance != null
+                      ? `You're about ${roundedDistance}m from ${nearest?.location.location_name}.`
+                      : `The drop unlocks at ${locations.length > 1 ? "one of these spots" : locations[0]?.location_name}.`}
+                  </p>
+                </>
+              )}
+            </div>
+
+            {campaign.reward_teaser && (
+              <RewardTeaserCard teaser={campaign.reward_teaser} />
             )}
-            <button onClick={runGeolocation} className={`mt-8 ${primaryBtn}`}>
-              Try again
+
+            <LocationsCard
+              locations={locations}
+              focusedLocationId={focusedLocationId}
+              focusNonce={focusNonce}
+              onFocusLocation={focusLocation}
+            />
+
+            {inAppBanner}
+
+            <button
+              onClick={checkAgain}
+              disabled={!canCheckAgain}
+              className={`mt-2 ${primaryBtn}`}
+            >
+              {checking ? "Checking…" : "Check again"}
             </button>
-          </Center>
+          </div>
         )}
 
         {step === "unlocked" && campaign && reward && (
           <div className="fade-up flex flex-1 flex-col gap-6">
             <div className="mt-2 text-center">
-              <p className="text-xs font-medium uppercase tracking-[0.3em] text-clay">
-                {campaign.artist_name}
-              </p>
+              <p className={eyebrow}>{campaign.artist_name}</p>
               <h1 className="mt-3 font-serif text-5xl">Unlocked</h1>
+              <CountdownLine label="Drop ends in" msRemaining={endsAtMs - now} />
               {locations.length > 1 && reward.location_name && (
                 <p className="mt-2 text-sm text-ink/50">
                   Unlocked at {reward.location_name}
@@ -647,7 +883,7 @@ export default function FanPage({ slug }: { slug: string }) {
                   track("ticket_click");
                   window.open(reward.ticket_url, "_blank", "noopener");
                 }}
-                className="w-full rounded-full bg-clay py-4 text-lg font-bold text-cream transition active:scale-[0.98]"
+                className={ticketBtn}
               >
                 Get tickets
               </button>
@@ -655,48 +891,70 @@ export default function FanPage({ slug }: { slug: string }) {
           </div>
         )}
 
-        {step === "permission_denied" && (
-          <Center>
-            <h1 className="font-serif text-3xl">Location is blocked</h1>
-            <p className="mt-3 text-ink/60">
-              We need your location to check you&apos;re at the spot. To
-              re-enable it:
-            </p>
-            <ul className="mt-4 w-full space-y-2 text-left text-sm text-ink/80">
-              <li className="rounded-xl border border-ink/20 p-3">
-                <span className="font-semibold">Safari:</span> tap the aA /
-                icon in the address bar → Website Settings → Location → Allow.
-              </li>
-              <li className="rounded-xl border border-ink/20 p-3">
-                <span className="font-semibold">Chrome:</span> tap the lock
-                icon by the address bar → Permissions → Location → Allow.
-              </li>
-            </ul>
-            <button onClick={runGeolocation} className={`mt-8 ${primaryBtn}`}>
-              Try again
-            </button>
-          </Center>
+        {step === "permission_denied" && campaign && (
+          <div className="fade-up flex flex-1 flex-col gap-6">
+            <Center>
+              <h1 className="font-serif text-3xl">Location is blocked</h1>
+              <CountdownLine label="Ends in" msRemaining={endsAtMs - now} />
+              <p className="mt-3 text-ink/60">
+                We need your location to check you&apos;re at the spot. To
+                re-enable it:
+              </p>
+              <ul className="mt-4 w-full space-y-2 text-left text-sm text-ink/80">
+                <li className="rounded-xl border border-ink/20 p-3">
+                  <span className="font-semibold">Safari:</span> tap the aA /
+                  icon in the address bar → Website Settings → Location →
+                  Allow.
+                </li>
+                <li className="rounded-xl border border-ink/20 p-3">
+                  <span className="font-semibold">Chrome:</span> tap the lock
+                  icon by the address bar → Permissions → Location → Allow.
+                </li>
+              </ul>
+              <button onClick={beginTracking} className={`mt-8 ${primaryBtn}`}>
+                Try again
+              </button>
+            </Center>
+
+            <LocationsCard
+              locations={locations}
+              focusedLocationId={focusedLocationId}
+              focusNonce={focusNonce}
+              onFocusLocation={focusLocation}
+            />
+          </div>
         )}
 
-        {step === "location_error" && (
-          <Center>
-            <h1 className="font-serif text-3xl">
-              Couldn&apos;t get your location
-            </h1>
-            <p className="mt-3 text-ink/60">
-              Your phone didn&apos;t return a position — this sometimes happens
-              indoors or with a weak signal. Step outside if you can, then try
-              again.
-            </p>
-            <button onClick={runGeolocation} className={`mt-8 ${primaryBtn}`}>
-              Try again
-            </button>
-          </Center>
+        {step === "location_error" && campaign && (
+          <div className="fade-up flex flex-1 flex-col gap-6">
+            <Center>
+              <h1 className="font-serif text-3xl">
+                Couldn&apos;t get your location
+              </h1>
+              <CountdownLine label="Ends in" msRemaining={endsAtMs - now} />
+              <p className="mt-3 text-ink/60">
+                Your phone didn&apos;t return a position — this sometimes
+                happens indoors or with a weak signal. Step outside if you
+                can, then try again.
+              </p>
+              <button onClick={beginTracking} className={`mt-8 ${primaryBtn}`}>
+                Try again
+              </button>
+            </Center>
+
+            <LocationsCard
+              locations={locations}
+              focusedLocationId={focusedLocationId}
+              focusNonce={focusNonce}
+              onFocusLocation={focusLocation}
+            />
+          </div>
         )}
 
-        {step === "rate_limited" && (
+        {step === "rate_limited" && campaign && (
           <Center>
             <h1 className="font-serif text-3xl">Too many attempts</h1>
+            <CountdownLine label="Ends in" msRemaining={endsAtMs - now} />
             <p className="mt-3 text-ink/60">
               Give it ten minutes, then try again.
             </p>
