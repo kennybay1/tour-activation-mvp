@@ -3,6 +3,7 @@ import { requireUser, supabaseServer } from "@/lib/supabase-server";
 import OrganiserCampaignForm, {
   type OrganiserFormValues,
 } from "../../campaign-form";
+import CampaignNav from "../../campaign-nav";
 
 export const dynamic = "force-dynamic";
 
@@ -62,6 +63,7 @@ export default async function EditCampaignPage({
 
   return (
     <div className="fade-up max-w-2xl">
+      <CampaignNav crumb={{ title: c.title, page: "Edit" }} />
       <h1 className="font-serif text-3xl">Edit campaign</h1>
       <p className="mt-1 mb-8 text-sm text-ink/50">{c.title}</p>
       <OrganiserCampaignForm

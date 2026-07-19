@@ -14,6 +14,7 @@ import {
   type BuilderLocation,
   MAX_LOCATIONS,
 } from "./location-types";
+import { useUnsavedChanges } from "@/app/unsaved-changes";
 
 // Leaflet touches window/document at import time, so it can only run in
 // the browser — ssr:false is required here, and next/dynamic only allows
@@ -152,6 +153,11 @@ export default function OrganiserCampaignForm({
   const [fileError, setFileError] = useState<string | null>(null);
   const originalPath = initialStoragePath ?? null;
 
+  // Every user edit flags unsaved changes; header/back/cancel navigation
+  // then prompts before discarding them. Cleared on successful save.
+  const guard = useUnsavedChanges();
+  const markDirty = () => guard?.setDirty(true);
+
   const onPickFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
     e.target.value = "";
@@ -165,13 +171,20 @@ export default function OrganiserCampaignForm({
       setFileError("That file is over 50MB.");
       return;
     }
+    markDirty();
     setFile(f);
   };
 
   const clearFile = () => {
+    markDirty();
     setFile(null);
     setFileError(null);
     setStoragePath(null);
+  };
+
+  const onLocationsChange = (next: BuilderLocation[]) => {
+    markDirty();
+    setLocations(next);
   };
 
   useEffect(() => {
@@ -186,7 +199,10 @@ export default function OrganiserCampaignForm({
   const set = <K extends keyof OrganiserFormValues>(
     key: K,
     value: OrganiserFormValues[K]
-  ) => setValues((v) => ({ ...v, [key]: value }));
+  ) => {
+    markDirty();
+    setValues((v) => ({ ...v, [key]: value }));
+  };
 
   // Auto-suggest slug from artist name until the organiser edits it.
   useEffect(() => {
@@ -383,6 +399,8 @@ export default function OrganiserCampaignForm({
       }
     }
 
+    // Everything's persisted — leaving is no longer a loss.
+    guard?.setDirty(false);
     router.push("/dashboard");
     router.refresh();
   }
@@ -460,7 +478,7 @@ export default function OrganiserCampaignForm({
         </p>
         <LocationBuilder
           locations={locations}
-          onChange={setLocations}
+          onChange={onLocationsChange}
           rowErrors={locErrors}
         />
       </div>
@@ -575,7 +593,12 @@ export default function OrganiserCampaignForm({
         </button>
         <button
           type="button"
-          onClick={() => router.push("/dashboard")}
+          onClick={() => {
+            // Cancel sits right next to Save — a stray click here is the
+            // most likely way to lose a half-built campaign.
+            if (guard && !guard.confirmIfDirty()) return;
+            router.push("/dashboard");
+          }}
           className="rounded-full border border-ink/30 px-7 py-3 font-medium text-ink/80 transition hover:border-ink/60"
         >
           Cancel

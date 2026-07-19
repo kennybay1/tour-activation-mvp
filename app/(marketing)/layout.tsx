@@ -1,5 +1,5 @@
 import Link from "next/link";
-import MarketingHeader from "./marketing-header";
+import SiteHeader from "../site-header";
 
 export default function MarketingLayout({
   children,
@@ -8,7 +8,7 @@ export default function MarketingLayout({
 }) {
   return (
     <div className="grain flex min-h-dvh flex-col bg-cream font-sans text-ink">
-      <MarketingHeader />
+      <SiteHeader />
       <main className="flex-1">{children}</main>
       <footer className="border-t border-ink/20">
         <div className="mx-auto w-full max-w-4xl px-5 py-8">

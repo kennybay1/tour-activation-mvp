@@ -1,6 +1,6 @@
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requireUser, supabaseServer } from "@/lib/supabase-server";
+import CampaignNav from "../../campaign-nav";
 
 export const dynamic = "force-dynamic";
 
@@ -100,12 +100,7 @@ export default async function OrganiserResultsPage({
 
   return (
     <div className="fade-up">
-      <Link
-        href="/dashboard"
-        className="text-sm font-medium text-ink/60 underline underline-offset-4 hover:text-ink"
-      >
-        ← Your campaigns
-      </Link>
+      <CampaignNav crumb={{ title: campaign.title, page: "Results" }} />
       <h1 className="mt-3 font-serif text-3xl">Results — {campaign.title}</h1>
       <p className="mt-1 text-xs uppercase tracking-[0.25em] text-clay">
         {campaign.artist_name}
