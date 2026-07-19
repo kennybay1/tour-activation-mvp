@@ -1,7 +1,46 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Component, useCallback, useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { supabase } from "@/lib/supabase";
+import { directionsUrlFor } from "./directions";
+import { FAN_MAP_HEIGHT } from "./fan-map-constants";
+
+// Leaflet touches window/document at import time (browser-only), and this
+// page is the top of the conversion funnel on mobile data — the tile
+// library must never sit ahead of the location list in the initial bundle.
+// ssr:false + a fixed-height loading placeholder (matching the real map's
+// height) means the list paints immediately with no layout shift once the
+// map chunk finishes downloading in the background.
+const FanMap = dynamic(() => import("./fan-map"), {
+  ssr: false,
+  loading: () => (
+    <div
+      style={{ height: FAN_MAP_HEIGHT }}
+      className="flex items-center justify-center rounded-2xl border border-ink/25 bg-cream-deep/40 text-sm text-ink/50"
+    >
+      Loading map…
+    </div>
+  ),
+});
+
+// A map failure (blocked chunk, offline) must never take the unlock flow
+// down with it — this only ever wraps FanMap, so a caught error just
+// removes the map card; the list above it with working Directions links
+// is a separate render tree and is completely unaffected.
+class MapErrorBoundary extends Component<
+  { children: React.ReactNode },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  render() {
+    if (this.state.hasError) return null;
+    return this.props.children;
+  }
+}
 
 type Campaign = {
   id: string;
@@ -22,10 +61,6 @@ type SpotLocation = {
   lat: number;
   lng: number;
 };
-
-function mapsUrlFor(loc: SpotLocation): string {
-  return `https://www.google.com/maps/search/?api=1&query=${loc.lat},${loc.lng}`;
-}
 
 type Reward = {
   reward_content_url: string | null;
@@ -88,6 +123,17 @@ export default function FanPage({ slug }: { slug: string }) {
   const [inApp, setInApp] = useState(false);
   const sessionRef = useRef<string>("");
   const viewTracked = useRef(false);
+
+  // Tapping a location in the list opens that marker's popup on the map.
+  // The nonce always increments alongside the id, even when re-tapping the
+  // same spot, so the map still re-focuses after the fan has since panned
+  // it away — an id-only signal would silently no-op on a same-value update.
+  const [focusedLocationId, setFocusedLocationId] = useState<string | null>(null);
+  const [focusNonce, setFocusNonce] = useState(0);
+  const focusLocation = useCallback((id: string) => {
+    setFocusedLocationId(id);
+    setFocusNonce((n) => n + 1);
+  }, []);
 
   const track = useCallback(
     (event_type: string, metadata?: Record<string, unknown>) => {
@@ -325,19 +371,35 @@ export default function FanPage({ slug }: { slug: string }) {
               )}
               <ul className="mt-2 space-y-4">
                 {locations.map((l) => (
-                  <li key={l.id}>
-                    <p className="text-lg font-medium">{l.location_name}</p>
+                  <li key={l.id} className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => focusLocation(l.id)}
+                      className="min-w-0 flex-1 text-left"
+                    >
+                      <p className="text-lg font-medium">{l.location_name}</p>
+                    </button>
                     <a
-                      href={mapsUrlFor(l)}
+                      href={directionsUrlFor(l)}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="mt-1 inline-block text-sm font-medium text-clay underline underline-offset-4"
+                      className="shrink-0 rounded-full border border-clay/60 px-4 py-2 text-sm font-medium text-clay transition active:scale-[0.98]"
                     >
-                      Open in Google Maps
+                      Directions
                     </a>
                   </li>
                 ))}
               </ul>
+
+              <div className="mt-4">
+                <MapErrorBoundary>
+                  <FanMap
+                    locations={locations}
+                    focusedId={focusedLocationId}
+                    focusNonce={focusNonce}
+                  />
+                </MapErrorBoundary>
+              </div>
             </div>
 
             <div className="divide-y divide-ink/15 border-y border-ink/25">
@@ -489,12 +551,12 @@ export default function FanPage({ slug }: { slug: string }) {
                   {locations.map((l) => (
                     <li key={l.id}>
                       <a
-                        href={mapsUrlFor(l)}
+                        href={directionsUrlFor(l)}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="font-medium text-clay underline underline-offset-4"
                       >
-                        {l.location_name}
+                        {l.location_name} — Directions
                       </a>
                     </li>
                   ))}
@@ -503,12 +565,12 @@ export default function FanPage({ slug }: { slug: string }) {
             ) : (
               locations[0] && (
                 <a
-                  href={mapsUrlFor(locations[0])}
+                  href={directionsUrlFor(locations[0])}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="mt-3 text-sm font-medium text-clay underline underline-offset-4"
                 >
-                  Open in Google Maps
+                  Directions
                 </a>
               )
             )}
