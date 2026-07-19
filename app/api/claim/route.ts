@@ -11,10 +11,11 @@ type ClaimSuccess = {
   reward_content_url: string | null;
   discount_code: string | null;
   ticket_url: string;
+  location_name: string | null;
 };
 type ClaimResponse =
   | { status: "expired" }
-  | { status: "out_of_range"; distance_m: number }
+  | { status: "out_of_range"; distance_m: number; nearest_location_name: string }
   | ClaimSuccess
   | { error: string };
 
@@ -107,7 +108,7 @@ export async function POST(
   // A campaign can have many locations; a campaign with none can't unlock.
   const { data: locations, error: locationsError } = await db
     .from("campaign_locations")
-    .select("id, lat, lng, radius_m")
+    .select("id, location_name, lat, lng, radius_m")
     .eq("campaign_id", campaign.id);
   if (locationsError) {
     return NextResponse.json({ error: "server_error" }, { status: 500 });
@@ -152,7 +153,7 @@ export async function POST(
       },
       { onConflict: "campaign_id,email" }
     )
-    .select("id, unlocked")
+    .select("id, unlocked, unlocked_location_id")
     .single();
   if (claimError || !claim) {
     return NextResponse.json({ error: "server_error" }, { status: 500 });
@@ -187,7 +188,11 @@ export async function POST(
       event_type: "unlock_out_of_range",
       metadata: { distance_m: distanceM, location_id: nearest.id },
     });
-    return NextResponse.json({ status: "out_of_range", distance_m: distanceM });
+    return NextResponse.json({
+      status: "out_of_range",
+      distance_m: distanceM,
+      nearest_location_name: nearest.location_name,
+    });
   }
 
   // An uploaded reward lives in the private storage bucket; hand out a
@@ -202,11 +207,18 @@ export async function POST(
   }
 
   if (claim.unlocked) {
+    // Name the location this fan ORIGINALLY unlocked at, not whichever is
+    // nearest right now — those can differ if they're revisiting a
+    // different valid spot in the same multi-location campaign.
+    const originalLocation = locations.find(
+      (l) => l.id === claim.unlocked_location_id
+    );
     return NextResponse.json({
       status: "already_claimed",
       reward_content_url: rewardContentUrl,
       discount_code: campaign.discount_code,
       ticket_url: campaign.ticket_url,
+      location_name: originalLocation?.location_name ?? nearest.location_name,
     });
   }
 
@@ -236,5 +248,6 @@ export async function POST(
     reward_content_url: rewardContentUrl,
     discount_code: campaign.discount_code,
     ticket_url: campaign.ticket_url,
+    location_name: nearest.location_name,
   });
 }

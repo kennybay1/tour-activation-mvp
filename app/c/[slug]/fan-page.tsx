@@ -31,6 +31,7 @@ type Reward = {
   reward_content_url: string | null;
   discount_code: string | null;
   ticket_url: string;
+  location_name: string | null;
 };
 
 type Step =
@@ -82,6 +83,7 @@ export default function FanPage({ slug }: { slug: string }) {
   const [consent, setConsent] = useState(false);
   const [reward, setReward] = useState<Reward | null>(null);
   const [distance, setDistance] = useState<number | null>(null);
+  const [nearestLocationName, setNearestLocationName] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [inApp, setInApp] = useState(false);
   const sessionRef = useRef<string>("");
@@ -175,6 +177,7 @@ export default function FanPage({ slug }: { slug: string }) {
           setStep("unlocked");
         } else if (json.status === "out_of_range") {
           setDistance(Math.max(50, Math.round(json.distance_m / 50) * 50));
+          setNearestLocationName(json.nearest_location_name ?? null);
           setStep("locked");
         } else if (json.status === "expired") {
           setStep("expired");
@@ -315,6 +318,11 @@ export default function FanPage({ slug }: { slug: string }) {
               <p className="text-xs font-medium uppercase tracking-[0.3em] text-ink/50">
                 {locations.length > 1 ? "The spots" : "The spot"}
               </p>
+              {locations.length > 1 && (
+                <p className="mt-2 text-sm text-ink/70">
+                  Unlock at any of {locations.length} locations.
+                </p>
+              )}
               <ul className="mt-2 space-y-4">
                 {locations.map((l) => (
                   <li key={l.id}>
@@ -469,24 +477,29 @@ export default function FanPage({ slug }: { slug: string }) {
             <h1 className="mt-4 font-serif text-3xl">Not quite there yet</h1>
             <p className="mt-2 text-ink/60">
               {locations.length > 1
-                ? "That's the distance to the nearest spot. The drop unlocks at any of these:"
+                ? `You're about ${distance}m from ${nearestLocationName ?? "the nearest spot"}.`
                 : `The drop unlocks at ${locations[0]?.location_name}.`}
             </p>
             {locations.length > 1 ? (
-              <ul className="mt-3 space-y-1 text-sm">
-                {locations.map((l) => (
-                  <li key={l.id}>
-                    <a
-                      href={mapsUrlFor(l)}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="font-medium text-clay underline underline-offset-4"
-                    >
-                      {l.location_name}
-                    </a>
-                  </li>
-                ))}
-              </ul>
+              <>
+                <p className="mt-1 text-sm text-ink/50">
+                  The drop unlocks at any of these:
+                </p>
+                <ul className="mt-3 space-y-1 text-sm">
+                  {locations.map((l) => (
+                    <li key={l.id}>
+                      <a
+                        href={mapsUrlFor(l)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-medium text-clay underline underline-offset-4"
+                      >
+                        {l.location_name}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </>
             ) : (
               locations[0] && (
                 <a
@@ -512,6 +525,11 @@ export default function FanPage({ slug }: { slug: string }) {
                 {campaign.artist_name}
               </p>
               <h1 className="mt-3 font-serif text-5xl">Unlocked</h1>
+              {locations.length > 1 && reward.location_name && (
+                <p className="mt-2 text-sm text-ink/50">
+                  Unlocked at {reward.location_name}
+                </p>
+              )}
             </div>
 
             {reward.reward_content_url && (
