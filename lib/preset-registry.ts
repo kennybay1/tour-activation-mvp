@@ -17,10 +17,24 @@ export type PresetDefinition = {
   label: string;
   // radius_m applied to locations committed from this preset's results.
   defaultRadius: number;
+  // Plural noun for count badges — "34 kiosks in view".
+  countNoun: string;
   buildQuery: (b: PresetBounds) => string;
   // Display name for a node whose OSM tags carry no name.
   fallbackName: (osmId: number) => string;
 };
+
+// Viewports larger than this are rejected server-side and pre-checked
+// client-side (to skip the pointless request entirely) — one shared cap.
+export const MAX_PRESET_AREA_KM2 = 100;
+
+export function boundsAreaKm2(b: PresetBounds): number {
+  const KM_PER_DEG = 111.32;
+  const heightKm = (b.north - b.south) * KM_PER_DEG;
+  const midLatRad = ((b.north + b.south) / 2) * (Math.PI / 180);
+  const widthKm = (b.east - b.west) * KM_PER_DEG * Math.cos(midLatRad);
+  return heightKm * widthKm;
+}
 
 // The corrected K6 tag matching, verified to return 409 nodes across
 // London — do not modify the tag clauses.
@@ -42,6 +56,7 @@ export const PRESETS: PresetDefinition[] = [
     id: "k6",
     label: "K6 Telephone Kiosks",
     defaultRadius: 200,
+    countNoun: "kiosks",
     buildQuery: k6Query,
     fallbackName: (osmId) => `K6 Kiosk — ${osmId}`,
   },

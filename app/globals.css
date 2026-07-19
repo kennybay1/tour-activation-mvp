@@ -110,10 +110,10 @@ body {
   color: var(--forest-deep);
 }
 
-/* Ghost markers for scanned-but-uncommitted preset locations — outline
-   only, no fill, so they read as obviously provisional next to the
-   solid committed markers above. */
-.moment-marker-ghost {
+/* Dormant preset-layer nodes — outline only, no fill, reduced opacity,
+   so they read as obviously provisional next to the solid committed
+   markers above. Clicking one activates it into a real location. */
+.moment-marker-dormant {
   box-sizing: border-box;
   width: 18px;
   height: 18px;
@@ -122,8 +122,7 @@ body {
   opacity: 0.55;
   cursor: pointer;
 }
-.moment-marker-ghost--selected {
-  border-style: solid;
+.moment-marker-dormant:hover {
   border-color: var(--clay);
   opacity: 0.9;
 }

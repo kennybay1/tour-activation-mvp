@@ -21,7 +21,12 @@ import {
 } from "./location-types";
 import LocationSearch, { type GeocodeResult } from "./location-search";
 import LocationAccordion from "./location-accordion";
-import { PRESETS, getPreset } from "@/lib/preset-registry";
+import {
+  PRESETS,
+  getPreset,
+  boundsAreaKm2,
+  MAX_PRESET_AREA_KM2,
+} from "@/lib/preset-registry";
 
 export type { BuilderLocation };
 
@@ -37,14 +42,17 @@ function externalRefForResult(r: GeocodeResult): string | null {
   return r.osm_type && r.osm_id != null ? `osm:${r.osm_type}:${r.osm_id}` : null;
 }
 
-type GhostNode = {
+// A node fetched from a preset layer — pure view-state, never persisted.
+// Activating one (a click) is what turns it into a real BuilderLocation.
+type PresetNode = {
   external_ref: string;
   location_name: string;
   lat: number;
   lng: number;
   preset_id: string;
-  selected: boolean;
 };
+
+const LAYER_REFETCH_DEBOUNCE_MS = 600;
 
 function haversineMeters(
   lat1: number,
@@ -78,16 +86,42 @@ function markerIcon(n: number, selected: boolean, hovered: boolean): L.DivIcon {
   });
 }
 
-// Outline-only square, no fill — visually unmistakable from a committed
-// (filled circular) marker, since it isn't one yet.
-function ghostIcon(selected: boolean): L.DivIcon {
-  return L.divIcon({
-    className: "",
-    html: `<div class="moment-marker-ghost${selected ? " moment-marker-ghost--selected" : ""}"></div>`,
-    iconSize: [20, 20],
-    iconAnchor: [10, 10],
-  });
-}
+// Outline-only square, no fill, no geofence circle — visually unmistakable
+// from an activated (filled circular) marker. One shared instance: divIcons
+// are stateless and there can be hundreds of dormant nodes at once.
+const DORMANT_ICON = L.divIcon({
+  className: "",
+  html: `<div class="moment-marker-dormant"></div>`,
+  iconSize: [20, 20],
+  iconAnchor: [10, 10],
+});
+
+// Memoized so pans/selection changes don't re-render hundreds of dormant
+// markers. Left-click activates; right-click is deliberately inert on
+// dormant nodes (deactivation is only for already-active preset nodes).
+const DormantNode = memo(function DormantNode({
+  node,
+  onActivate,
+}: {
+  node: PresetNode;
+  onActivate: (n: PresetNode) => void;
+}) {
+  return (
+    <Marker
+      position={[node.lat, node.lng]}
+      icon={DORMANT_ICON}
+      eventHandlers={{
+        click: (e) => {
+          L.DomEvent.stopPropagation(e);
+          onActivate(node);
+        },
+        contextmenu: (e) => {
+          L.DomEvent.stopPropagation(e);
+        },
+      }}
+    />
+  );
+});
 
 function MapReady({ onReady }: { onReady: (m: L.Map) => void }) {
   const map = useMap();
@@ -111,6 +145,14 @@ function ViewPersist() {
       } catch {}
     },
   });
+  return null;
+}
+
+// Preset layers refetch for the new viewport after every pan/zoom — the
+// debounce lives in the parent so a fling of successive moveends coalesces
+// into one request.
+function MoveEndWatcher({ onMoveEnd }: { onMoveEnd: () => void }) {
+  useMapEvents({ moveend: onMoveEnd });
   return null;
 }
 
@@ -142,6 +184,9 @@ type LocationMapItemProps = {
   isHovered: boolean;
   onSelect: (tempId: string, additive: boolean) => void;
   onDragEnd: (tempId: string, lat: number, lng: number) => void;
+  // Right-click / long-press. The parent decides what (if anything) it
+  // does — only preset-sourced locations deactivate.
+  onContextMenu: (tempId: string) => void;
 };
 
 // One marker + its geofence circle, memoized so dragging or editing one
@@ -156,6 +201,7 @@ const LocationMapItem = memo(function LocationMapItem({
   isHovered,
   onSelect,
   onDragEnd,
+  onContextMenu,
 }: LocationMapItemProps) {
   const circleRef = useRef<L.Circle | null>(null);
 
@@ -170,6 +216,10 @@ const LocationMapItem = memo(function LocationMapItem({
             L.DomEvent.stopPropagation(e);
             const oe = e.originalEvent;
             onSelect(location.tempId, oe.metaKey || oe.ctrlKey || oe.shiftKey);
+          },
+          contextmenu: (e) => {
+            L.DomEvent.stopPropagation(e);
+            onContextMenu(location.tempId);
           },
           drag: (e) => {
             const p = (e.target as L.Marker).getLatLng();
@@ -245,14 +295,22 @@ export default function LocationBuilder({
   const selectedIdsRef = useRef(selectedIds);
   selectedIdsRef.current = selectedIds;
 
-  // Preset scanner state — entirely separate from the committed
-  // `locations` array until the organiser explicitly commits. Scans cover
-  // whatever the viewport shows at the moment "Scan this area" is pressed.
-  const [scanOpen, setScanOpen] = useState(false);
-  const [scanPresetId, setScanPresetId] = useState(PRESETS[0].id);
-  const [scanning, setScanning] = useState(false);
-  const [scanError, setScanError] = useState<string | null>(null);
-  const [ghosts, setGhosts] = useState<GhostNode[]>([]);
+  // Preset layers. layerNodes is the merged, deduped-by-external_ref pool
+  // of every node fetched so far (across pans) — pure view-state, never
+  // saved. activeLayers drives which presets' dormant nodes render.
+  // viewBounds tracks the current viewport for the "N in view" badges.
+  const [presetMenuOpen, setPresetMenuOpen] = useState(false);
+  const [activeLayers, setActiveLayers] = useState<Set<string>>(new Set());
+  const [layerNodes, setLayerNodes] = useState<Map<string, PresetNode>>(
+    new Map()
+  );
+  const [layerLoading, setLayerLoading] = useState(false);
+  const [layerNotice, setLayerNotice] = useState<string | null>(null);
+  const [viewBounds, setViewBounds] = useState<L.LatLngBounds | null>(null);
+  const activeLayersRef = useRef(activeLayers);
+  activeLayersRef.current = activeLayers;
+  const layerAbortRef = useRef<AbortController | null>(null);
+  const layerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const initialView = useMemo(() => {
     try {
@@ -309,6 +367,12 @@ export default function LocationBuilder({
 
   const onMapReady = (m: L.Map) => {
     mapRef.current = m;
+    // Right-click (and long-press on touch) is a deactivation gesture on
+    // preset markers — the browser's own context menu must never appear
+    // anywhere on the map canvas. Leaflet still delivers its contextmenu
+    // events to markers; this only suppresses the native menu.
+    m.getContainer().addEventListener("contextmenu", (e) => e.preventDefault());
+    setViewBounds(m.getBounds());
     if (!didInitialFit.current && locations.length) {
       didInitialFit.current = true;
       m.fitBounds(
@@ -544,107 +608,175 @@ export default function LocationBuilder({
 
   const atCap = locations.length >= MAX_LOCATIONS;
 
-  // ── Preset scanner ──────────────────────────────────────────────
+  // ── Preset layers ───────────────────────────────────────────────
 
   const committedRefs = useMemo(
     () => new Set(locations.map((l) => l.external_ref).filter(Boolean) as string[]),
     [locations]
   );
 
-  const openScan = () => {
-    setGhosts([]);
-    setScanError(null);
-    setScanOpen(true);
-  };
-
-  const closeScan = () => {
-    setScanOpen(false);
-    setGhosts([]);
-    setScanError(null);
-    setScanning(false);
-  };
-
-  const runScan = async () => {
+  const fetchLayers = useCallback(async () => {
     const m = mapRef.current;
-    if (!m || scanning) return;
-    const mapBounds = m.getBounds();
-    setScanning(true);
-    setScanError(null);
-    try {
-      const res = await fetch("/api/presets/query", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          preset_id: scanPresetId,
-          bounds: {
-            south: mapBounds.getSouth(),
-            west: mapBounds.getWest(),
-            north: mapBounds.getNorth(),
-            east: mapBounds.getEast(),
-          },
-        }),
-      });
-      const json = await res.json();
-      if (!res.ok) {
-        setScanError(
-          json.error === "area_too_large"
-            ? "Zoom in to load kiosks."
-            : typeof json.error === "string" && json.error.includes(" ")
-              ? json.error
-              : "Couldn't scan this area. Try again."
-        );
-        setGhosts([]);
-        return;
-      }
-      setGhosts(
-        (json.locations as Omit<GhostNode, "selected">[]).map((k) => ({
-          ...k,
-          selected: true,
-        }))
-      );
-    } catch {
-      setScanError("Couldn't reach the scan service. Check your connection and try again.");
-      setGhosts([]);
-    } finally {
-      setScanning(false);
-    }
-  };
-
-  const toggleGhost = (ref: string) =>
-    setGhosts((gs) =>
-      gs.map((g) => (g.external_ref === ref ? { ...g, selected: !g.selected } : g))
-    );
-
-  const selectableGhosts = ghosts.filter((g) => !committedRefs.has(g.external_ref));
-  const selectedCount = selectableGhosts.filter((g) => g.selected).length;
-
-  const commitGhosts = () => {
-    const toCommit = selectableGhosts.filter((g) => g.selected);
-    if (!toCommit.length) return;
-    const total = locations.length + toCommit.length;
-    if (total > MAX_LOCATIONS) {
-      setScanError(
-        `Committing these ${toCommit.length} would put you at ${total} locations — over the ${MAX_LOCATIONS} limit. Deselect some first.`
-      );
+    const ids = Array.from(activeLayersRef.current);
+    if (!m || !ids.length) return;
+    const b = m.getBounds();
+    const bounds = {
+      south: b.getSouth(),
+      west: b.getWest(),
+      north: b.getNorth(),
+      east: b.getEast(),
+    };
+    // Same cap the server enforces — checked here first so a zoomed-out
+    // map shows "zoom in" without a doomed request. Existing nodes stay.
+    if (boundsAreaKm2(bounds) > MAX_PRESET_AREA_KM2) {
+      setLayerNotice("Zoom in to load kiosks.");
       return;
     }
-    const newLocs: BuilderLocation[] = toCommit.map((g, i) => ({
-      tempId: makeTempId(),
-      location_name: g.location_name,
-      lat: g.lat,
-      lng: g.lng,
-      radius_m: getPreset(g.preset_id)?.defaultRadius ?? DEFAULT_RADIUS_M,
-      sort_order: locations.length + i,
-      source: `preset:${g.preset_id}`,
-      external_ref: g.external_ref,
-    }));
-    onChange([...locations, ...newLocs]);
-    const committed = new Set(toCommit.map((g) => g.external_ref));
-    const remaining = ghosts.filter((g) => !committed.has(g.external_ref));
-    setGhosts(remaining);
-    setScanError(null);
-    if (!remaining.length) setScanOpen(false);
+    layerAbortRef.current?.abort();
+    const controller = new AbortController();
+    layerAbortRef.current = controller;
+    setLayerLoading(true);
+    setLayerNotice(null);
+    try {
+      const results = await Promise.all(
+        ids.map(async (id) => {
+          const res = await fetch("/api/presets/query", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ preset_id: id, bounds }),
+            signal: controller.signal,
+          });
+          const json = await res.json();
+          if (!res.ok) {
+            throw new Error(
+              json.error === "area_too_large"
+                ? "Zoom in to load kiosks."
+                : typeof json.error === "string" && json.error.includes(" ")
+                  ? json.error
+                  : "Couldn't load preset nodes. Try again."
+            );
+          }
+          return json.locations as PresetNode[];
+        })
+      );
+      // Merge into the pool — a node seen on an earlier pan is kept, never
+      // duplicated, keyed by its stable external_ref.
+      setLayerNodes((prev) => {
+        const next = new Map(prev);
+        for (const list of results) {
+          for (const n of list) {
+            if (!next.has(n.external_ref)) next.set(n.external_ref, n);
+          }
+        }
+        return next;
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") return;
+      setLayerNotice(
+        err instanceof Error ? err.message : "Couldn't load preset nodes. Try again."
+      );
+    } finally {
+      // A newer fetch may have superseded this one — only the latest
+      // request owns the loading flag.
+      if (layerAbortRef.current === controller) setLayerLoading(false);
+    }
+  }, []);
+
+  // Immediate fetch when a layer turns on (or the active set changes).
+  useEffect(() => {
+    if (activeLayers.size) fetchLayers();
+  }, [activeLayers, fetchLayers]);
+
+  // Cancel any in-flight work when the builder unmounts.
+  useEffect(
+    () => () => {
+      layerAbortRef.current?.abort();
+      if (layerTimerRef.current) clearTimeout(layerTimerRef.current);
+    },
+    []
+  );
+
+  const onMapMoveEnd = useCallback(() => {
+    const m = mapRef.current;
+    if (m) setViewBounds(m.getBounds());
+    if (!activeLayersRef.current.size) return;
+    if (layerTimerRef.current) clearTimeout(layerTimerRef.current);
+    layerTimerRef.current = setTimeout(fetchLayers, LAYER_REFETCH_DEBOUNCE_MS);
+  }, [fetchLayers]);
+
+  const toggleLayer = (id: string) => {
+    const next = new Set(activeLayers);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setActiveLayers(next);
+    if (!next.size) {
+      layerAbortRef.current?.abort();
+      if (layerTimerRef.current) clearTimeout(layerTimerRef.current);
+      setLayerLoading(false);
+      setLayerNotice(null);
+    }
   };
+
+  // Dormant = fetched, layer on, and not already a campaign location —
+  // activated nodes render as normal markers via `locations`, and this
+  // derivation is also what returns a node to dormant the moment its
+  // location is removed (right-click or the accordion's Remove).
+  const dormantNodes = useMemo(() => {
+    if (!activeLayers.size) return [];
+    const out: PresetNode[] = [];
+    for (const n of layerNodes.values()) {
+      if (activeLayers.has(n.preset_id) && !committedRefs.has(n.external_ref)) {
+        out.push(n);
+      }
+    }
+    return out;
+  }, [layerNodes, activeLayers, committedRefs]);
+
+  // "N kiosks in view" badges — counts every known node of the preset
+  // inside the current viewport, activated or not.
+  const inViewCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    if (!viewBounds) return counts;
+    for (const n of layerNodes.values()) {
+      if (viewBounds.contains([n.lat, n.lng])) {
+        counts[n.preset_id] = (counts[n.preset_id] ?? 0) + 1;
+      }
+    }
+    return counts;
+  }, [layerNodes, viewBounds]);
+
+  const activateNode = useCallback(
+    (node: PresetNode) => {
+      // The cap banner below the map is already visible whenever at cap.
+      if (locationsRef.current.length >= MAX_LOCATIONS) return;
+      if (locationsRef.current.some((l) => l.external_ref === node.external_ref))
+        return;
+      const next: BuilderLocation = {
+        tempId: makeTempId(),
+        location_name: node.location_name,
+        lat: node.lat,
+        lng: node.lng,
+        radius_m: getPreset(node.preset_id)?.defaultRadius ?? DEFAULT_RADIUS_M,
+        sort_order: locationsRef.current.length,
+        source: `preset:${node.preset_id}`,
+        external_ref: node.external_ref,
+      };
+      onChange([...locationsRef.current, next]);
+      selectOnly(next.tempId);
+    },
+    [onChange, selectOnly]
+  );
+
+  // Right-click deactivation is a preset-only shortcut — manually added
+  // and searched locations are untouched by it.
+  const onMarkerContextMenu = useCallback(
+    (tempId: string) => {
+      const loc = locationsRef.current.find((l) => l.tempId === tempId);
+      if (!loc || !loc.source.startsWith("preset:")) return;
+      remove(tempId);
+    },
+    [remove]
+  );
 
   const controlBtn =
     "rounded-full border border-ink/30 bg-cream px-4 py-1.5 text-xs font-medium text-ink/80 shadow-sm transition hover:border-ink/60 disabled:opacity-50";
@@ -666,6 +798,7 @@ export default function LocationBuilder({
           <ZoomControl position="bottomleft" />
           <MapReady onReady={onMapReady} />
           <ViewPersist />
+          <MoveEndWatcher onMoveEnd={onMapMoveEnd} />
           <MapInteractions
             addModeActive={addMode && !atCap}
             onPlace={addAt}
@@ -681,32 +814,15 @@ export default function LocationBuilder({
               isHovered={hoveredId === l.tempId}
               onSelect={onMarkerSelect}
               onDragEnd={onMarkerDragEnd}
+              onContextMenu={onMarkerContextMenu}
             />
           ))}
 
-          {ghosts.map((g) => (
-            <Marker
-              key={g.external_ref}
-              position={[g.lat, g.lng]}
-              icon={ghostIcon(g.selected && !committedRefs.has(g.external_ref))}
-              eventHandlers={{
-                click: () => {
-                  if (!committedRefs.has(g.external_ref)) toggleGhost(g.external_ref);
-                },
-              }}
-            />
-          ))}
-          {ghosts.map((g) => (
-            <Circle
-              key={`gc-${g.external_ref}`}
-              center={[g.lat, g.lng]}
-              radius={getPreset(g.preset_id)?.defaultRadius ?? DEFAULT_RADIUS_M}
-              pathOptions={{
-                color: g.selected ? "#b0603a" : "#a9bfae",
-                weight: 1,
-                dashArray: "4 4",
-                fillOpacity: 0,
-              }}
+          {dormantNodes.map((n) => (
+            <DormantNode
+              key={n.external_ref}
+              node={n}
+              onActivate={activateNode}
             />
           ))}
         </MapContainer>
@@ -717,12 +833,80 @@ export default function LocationBuilder({
           <span className="absolute left-1/2 top-1/2 h-1 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-ink/50" />
         </div>
 
-        <div className="absolute left-3 top-3 z-[1000]">
+        <div className="absolute left-3 top-3 z-[1000] flex flex-col items-start gap-2">
           <LocationSearch
             getBounds={getMapBounds}
             onNavigate={navigateToResult}
             onAddHere={addSearchResult}
           />
+
+          <button
+            type="button"
+            aria-expanded={presetMenuOpen}
+            onClick={() => setPresetMenuOpen((o) => !o)}
+            className={
+              activeLayers.size
+                ? "rounded-full bg-clay px-4 py-1.5 text-xs font-semibold text-cream shadow-sm transition"
+                : controlBtn
+            }
+          >
+            Presets{activeLayers.size ? ` — ${activeLayers.size} on` : ""}
+          </button>
+
+          {presetMenuOpen && (
+            <div className="w-64 rounded-xl border border-ink/25 bg-cream p-3 shadow-md">
+              <p className="text-xs font-medium uppercase tracking-[0.15em] text-ink/60">
+                Preset layers
+              </p>
+              {/* Rendered generically from the registry — a future preset
+                  appears here with no UI changes. */}
+              {PRESETS.map((p) => {
+                const on = activeLayers.has(p.id);
+                return (
+                  <div
+                    key={p.id}
+                    className="mt-3 flex items-center justify-between gap-3"
+                  >
+                    <div className="min-w-0">
+                      <p className="text-sm text-ink">{p.label}</p>
+                      {on && (
+                        <p className="text-xs text-ink/50">
+                          {inViewCounts[p.id] ?? 0} {p.countNoun} in view
+                        </p>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={on}
+                      aria-label={`Toggle ${p.label}`}
+                      onClick={() => toggleLayer(p.id)}
+                      className={`relative h-6 w-11 shrink-0 rounded-full transition ${
+                        on ? "bg-forest-deep" : "bg-ink/20"
+                      }`}
+                    >
+                      <span
+                        className={`absolute top-0.5 h-5 w-5 rounded-full bg-cream shadow-sm transition-all ${
+                          on ? "left-[22px]" : "left-0.5"
+                        }`}
+                      />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {layerLoading && (
+            <p className="rounded-full bg-cream/90 px-3 py-1 text-xs text-ink/60 shadow-sm">
+              Loading presets…
+            </p>
+          )}
+          {layerNotice && !layerLoading && (
+            <p className="max-w-[16rem] rounded-full bg-cream/90 px-3 py-1 text-xs font-medium text-clay shadow-sm">
+              {layerNotice}
+            </p>
+          )}
         </div>
 
         <div className="absolute right-3 top-3 z-[1000] flex flex-col items-end gap-2">
@@ -754,118 +938,8 @@ export default function LocationBuilder({
           >
             Fit all
           </button>
-          <button
-            type="button"
-            onClick={() => (scanOpen ? closeScan() : openScan())}
-            disabled={atCap && !scanOpen}
-            className={
-              scanOpen
-                ? "rounded-full bg-clay px-4 py-1.5 text-xs font-semibold text-cream shadow-sm transition"
-                : controlBtn
-            }
-          >
-            {scanOpen ? "Scanning presets — on" : "Scan presets"}
-          </button>
         </div>
 
-        {scanOpen && (
-          <div className="absolute bottom-3 left-3 right-3 z-[1000] max-h-[300px] overflow-y-auto rounded-2xl border border-ink/25 bg-cream/95 p-4 shadow-md backdrop-blur-sm sm:right-auto sm:w-80">
-            <p className="text-xs font-medium uppercase tracking-[0.15em] text-ink/60">
-              Scan this area
-            </p>
-            <div className="mt-3 flex items-center gap-2">
-              {/* Rendered generically from the preset registry — with one
-                  preset it's a single-option select; new presets appear
-                  here with no UI changes. */}
-              <select
-                value={scanPresetId}
-                onChange={(e) => setScanPresetId(e.target.value)}
-                className="min-w-0 flex-1 rounded-lg border border-ink/20 bg-transparent px-2 py-1.5 text-sm text-ink outline-none focus:border-forest"
-              >
-                {PRESETS.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.label}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                onClick={runScan}
-                disabled={scanning}
-                className="shrink-0 rounded-full bg-forest-deep px-4 py-1.5 text-xs font-semibold text-parchment transition active:scale-[0.98] disabled:opacity-50"
-              >
-                {scanning ? "Scanning…" : ghosts.length ? "Scan again" : "Scan this area"}
-              </button>
-            </div>
-            <p className="mt-1 text-xs text-ink/50">
-              Searches whatever the map currently shows — pan and zoom first.
-            </p>
-            {scanError && (
-              <p className="mt-2 text-xs font-medium text-clay">{scanError}</p>
-            )}
-
-            {ghosts.length > 0 && (
-              <>
-                <p className="mt-4 font-serif text-lg">
-                  {ghosts.length} FOUND
-                </p>
-                <p className="text-xs text-ink/50">{selectedCount} selected</p>
-                <div className="mt-2 max-h-40 space-y-1 overflow-y-auto">
-                  {ghosts.map((g, i) => {
-                    const already = committedRefs.has(g.external_ref);
-                    return (
-                      <label
-                        key={g.external_ref}
-                        className={`flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs ${
-                          already ? "opacity-50" : "hover:bg-cream-deep/60"
-                        }`}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={already ? true : g.selected}
-                          disabled={already}
-                          onChange={() => toggleGhost(g.external_ref)}
-                          className="h-4 w-4 shrink-0 accent-clay"
-                        />
-                        <span className="shrink-0 font-mono uppercase text-clay">
-                          {g.preset_id}-{String(i + 1).padStart(3, "0")}
-                        </span>
-                        <span className="min-w-0 flex-1 truncate text-ink/80">
-                          {g.location_name}
-                        </span>
-                        {already && (
-                          <span className="shrink-0 text-ink/50">
-                            Already added
-                          </span>
-                        )}
-                      </label>
-                    );
-                  })}
-                </div>
-              </>
-            )}
-
-            <div className="mt-4 flex gap-2">
-              {ghosts.length > 0 && (
-                <button
-                  type="button"
-                  onClick={commitGhosts}
-                  disabled={selectedCount === 0}
-                  className="rounded-full bg-forest-deep px-4 py-1.5 text-xs font-semibold text-parchment transition active:scale-[0.98] disabled:opacity-50"
-                >
-                  Commit preset nodes
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={closeScan}
-                className="rounded-full border border-ink/30 px-4 py-1.5 text-xs font-medium text-ink/70 transition hover:border-ink/60"
-              >
-                {ghosts.length ? "Clear scan" : "Cancel"}
-              </button>
-            </div>
-          </div>
-        )}
       </div>
 
       {atCap && (

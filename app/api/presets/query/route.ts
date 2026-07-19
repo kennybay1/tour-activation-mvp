@@ -1,7 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/supabase-server";
 import { supabaseAdmin } from "@/lib/supabase-admin";
-import { getPreset, type PresetBounds } from "@/lib/preset-registry";
+import {
+  getPreset,
+  boundsAreaKm2,
+  MAX_PRESET_AREA_KM2,
+  type PresetBounds,
+} from "@/lib/preset-registry";
 
 // Overpass' free instance is a shared community resource with an
 // acceptable-use policy — this route exists so the browser never talks to
@@ -13,9 +18,6 @@ export const maxDuration = 15;
 const OVERPASS_URL = "https://overpass-api.de/api/interpreter";
 const OVERPASS_TIMEOUT_MS = 10_000;
 const CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
-// A viewport much bigger than a city district returns too much to be
-// useful and leans too hard on Overpass — the client shows "zoom in".
-const MAX_AREA_KM2 = 100;
 
 type PresetLocation = {
   lat: number;
@@ -39,14 +41,6 @@ type OverpassElement = {
 
 function isFiniteInRange(v: unknown, min: number, max: number): v is number {
   return typeof v === "number" && Number.isFinite(v) && v >= min && v <= max;
-}
-
-function boundsAreaKm2(b: PresetBounds): number {
-  const KM_PER_DEG = 111.32;
-  const heightKm = (b.north - b.south) * KM_PER_DEG;
-  const midLatRad = ((b.north + b.south) / 2) * (Math.PI / 180);
-  const widthKm = (b.east - b.west) * KM_PER_DEG * Math.cos(midLatRad);
-  return heightKm * widthKm;
 }
 
 // Round bounds OUTWARD to a 2-decimal-place grid (~1.1km). Scanning and
@@ -105,7 +99,7 @@ export async function POST(
     east: b.east,
   };
 
-  if (boundsAreaKm2(rawBounds) > MAX_AREA_KM2) {
+  if (boundsAreaKm2(rawBounds) > MAX_PRESET_AREA_KM2) {
     // Distinct code — the client shows "zoom in" rather than an error.
     return NextResponse.json({ error: "area_too_large" }, { status: 400 });
   }
