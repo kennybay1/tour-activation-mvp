@@ -21,13 +21,12 @@ import {
 } from "./location-types";
 import LocationSearch, { type GeocodeResult } from "./location-search";
 import LocationAccordion from "./location-accordion";
+import { PRESETS, getPreset } from "@/lib/preset-registry";
 
 export type { BuilderLocation };
 
 const LONDON: [number, number] = [51.5074, -0.1278];
 const VIEW_KEY = "moments_map_view";
-const MIN_SCAN_RADIUS = 100;
-const MAX_SCAN_RADIUS = 5000;
 // How close a commit needs to land to the last search result for its name
 // to carry over — close enough that it's clearly "that place", not a
 // coincidence of the crosshair drifting nearby.
@@ -38,12 +37,12 @@ function externalRefForResult(r: GeocodeResult): string | null {
   return r.osm_type && r.osm_id != null ? `osm:${r.osm_type}:${r.osm_id}` : null;
 }
 
-type GhostKiosk = {
+type GhostNode = {
   external_ref: string;
   location_name: string;
   lat: number;
   lng: number;
-  design: string | null;
+  preset_id: string;
   selected: boolean;
 };
 
@@ -247,13 +246,13 @@ export default function LocationBuilder({
   selectedIdsRef.current = selectedIds;
 
   // Preset scanner state — entirely separate from the committed
-  // `locations` array until the organiser explicitly commits.
+  // `locations` array until the organiser explicitly commits. Scans cover
+  // whatever the viewport shows at the moment "Scan this area" is pressed.
   const [scanOpen, setScanOpen] = useState(false);
-  const [scanCenter, setScanCenter] = useState<{ lat: number; lng: number } | null>(null);
-  const [scanRadius, setScanRadius] = useState(1000);
+  const [scanPresetId, setScanPresetId] = useState(PRESETS[0].id);
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
-  const [ghosts, setGhosts] = useState<GhostKiosk[]>([]);
+  const [ghosts, setGhosts] = useState<GhostNode[]>([]);
 
   const initialView = useMemo(() => {
     try {
@@ -553,30 +552,6 @@ export default function LocationBuilder({
   );
 
   const openScan = () => {
-    const m = mapRef.current;
-    if (!m) return;
-    const c = m.getCenter();
-    const size = m.getSize();
-    // Default the scan radius to whatever's already visible on screen —
-    // "use the current map bounds by default" — clamped to the API's
-    // accepted range. If the container hasn't been laid out yet (size is
-    // degenerate), fall back to a sensible fixed default rather than
-    // trusting a near-zero bounding box.
-    let defaultRadius = 1000;
-    if (size.x > 0 && size.y > 0) {
-      const bounds = m.getBounds();
-      const edgeDistance = Math.min(
-        haversineMeters(c.lat, c.lng, bounds.getNorth(), c.lng),
-        haversineMeters(c.lat, c.lng, bounds.getSouth(), c.lng),
-        haversineMeters(c.lat, c.lng, c.lat, bounds.getEast()),
-        haversineMeters(c.lat, c.lng, c.lat, bounds.getWest())
-      );
-      if (edgeDistance > MIN_SCAN_RADIUS) defaultRadius = edgeDistance;
-    }
-    setScanCenter({ lat: c.lat, lng: c.lng });
-    setScanRadius(
-      Math.round(Math.min(MAX_SCAN_RADIUS, Math.max(MIN_SCAN_RADIUS, defaultRadius)))
-    );
     setGhosts([]);
     setScanError(null);
     setScanOpen(true);
@@ -590,30 +565,39 @@ export default function LocationBuilder({
   };
 
   const runScan = async () => {
-    if (!scanCenter || scanning) return;
-    const radius = Math.round(
-      Math.min(MAX_SCAN_RADIUS, Math.max(MIN_SCAN_RADIUS, scanRadius))
-    );
+    const m = mapRef.current;
+    if (!m || scanning) return;
+    const mapBounds = m.getBounds();
     setScanning(true);
     setScanError(null);
     try {
-      const res = await fetch("/api/presets/phone-boxes", {
+      const res = await fetch("/api/presets/query", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lat: scanCenter.lat, lng: scanCenter.lng, radius }),
+        body: JSON.stringify({
+          preset_id: scanPresetId,
+          bounds: {
+            south: mapBounds.getSouth(),
+            west: mapBounds.getWest(),
+            north: mapBounds.getNorth(),
+            east: mapBounds.getEast(),
+          },
+        }),
       });
       const json = await res.json();
       if (!res.ok) {
         setScanError(
-          typeof json.error === "string"
-            ? json.error
-            : "Couldn't scan this area. Try again."
+          json.error === "area_too_large"
+            ? "Zoom in to load kiosks."
+            : typeof json.error === "string" && json.error.includes(" ")
+              ? json.error
+              : "Couldn't scan this area. Try again."
         );
         setGhosts([]);
         return;
       }
       setGhosts(
-        (json.locations as Omit<GhostKiosk, "selected">[]).map((k) => ({
+        (json.locations as Omit<GhostNode, "selected">[]).map((k) => ({
           ...k,
           selected: true,
         }))
@@ -649,9 +633,9 @@ export default function LocationBuilder({
       location_name: g.location_name,
       lat: g.lat,
       lng: g.lng,
-      radius_m: DEFAULT_RADIUS_M,
+      radius_m: getPreset(g.preset_id)?.defaultRadius ?? DEFAULT_RADIUS_M,
       sort_order: locations.length + i,
-      source: "preset:k6",
+      source: `preset:${g.preset_id}`,
       external_ref: g.external_ref,
     }));
     onChange([...locations, ...newLocs]);
@@ -700,18 +684,6 @@ export default function LocationBuilder({
             />
           ))}
 
-          {scanOpen && scanCenter && (
-            <Circle
-              center={[scanCenter.lat, scanCenter.lng]}
-              radius={scanRadius}
-              pathOptions={{
-                color: "#b0603a",
-                weight: 2,
-                dashArray: "8 6",
-                fillOpacity: 0,
-              }}
-            />
-          )}
           {ghosts.map((g) => (
             <Marker
               key={g.external_ref}
@@ -728,7 +700,7 @@ export default function LocationBuilder({
             <Circle
               key={`gc-${g.external_ref}`}
               center={[g.lat, g.lng]}
-              radius={DEFAULT_RADIUS_M}
+              radius={getPreset(g.preset_id)?.defaultRadius ?? DEFAULT_RADIUS_M}
               pathOptions={{
                 color: g.selected ? "#b0603a" : "#a9bfae",
                 weight: 1,
@@ -799,41 +771,35 @@ export default function LocationBuilder({
         {scanOpen && (
           <div className="absolute bottom-3 left-3 right-3 z-[1000] max-h-[300px] overflow-y-auto rounded-2xl border border-ink/25 bg-cream/95 p-4 shadow-md backdrop-blur-sm sm:right-auto sm:w-80">
             <p className="text-xs font-medium uppercase tracking-[0.15em] text-ink/60">
-              Scan for red telephone kiosks
+              Scan this area
             </p>
             <div className="mt-3 flex items-center gap-2">
-              <label className="flex items-center gap-1.5 font-mono text-xs text-ink/60">
-                Radius
-                <input
-                  inputMode="numeric"
-                  value={String(scanRadius)}
-                  onChange={(e) =>
-                    setScanRadius(
-                      Number(e.target.value.replace(/[^0-9]/g, "")) || 0
-                    )
-                  }
-                  className="w-20 rounded-lg border border-ink/20 bg-transparent px-2 py-1.5 text-right text-sm text-ink outline-none focus:border-forest"
-                />
-                m
-              </label>
+              {/* Rendered generically from the preset registry — with one
+                  preset it's a single-option select; new presets appear
+                  here with no UI changes. */}
+              <select
+                value={scanPresetId}
+                onChange={(e) => setScanPresetId(e.target.value)}
+                className="min-w-0 flex-1 rounded-lg border border-ink/20 bg-transparent px-2 py-1.5 text-sm text-ink outline-none focus:border-forest"
+              >
+                {PRESETS.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
               <button
                 type="button"
                 onClick={runScan}
-                disabled={
-                  scanning ||
-                  scanRadius < MIN_SCAN_RADIUS ||
-                  scanRadius > MAX_SCAN_RADIUS
-                }
-                className="rounded-full bg-forest-deep px-4 py-1.5 text-xs font-semibold text-parchment transition active:scale-[0.98] disabled:opacity-50"
+                disabled={scanning}
+                className="shrink-0 rounded-full bg-forest-deep px-4 py-1.5 text-xs font-semibold text-parchment transition active:scale-[0.98] disabled:opacity-50"
               >
-                {scanning ? "Scanning…" : ghosts.length ? "Scan again" : "Run scan"}
+                {scanning ? "Scanning…" : ghosts.length ? "Scan again" : "Scan this area"}
               </button>
             </div>
-            {(scanRadius < MIN_SCAN_RADIUS || scanRadius > MAX_SCAN_RADIUS) && (
-              <p className="mt-1 text-xs font-medium text-clay">
-                Radius must be between {MIN_SCAN_RADIUS} and {MAX_SCAN_RADIUS}m.
-              </p>
-            )}
+            <p className="mt-1 text-xs text-ink/50">
+              Searches whatever the map currently shows — pan and zoom first.
+            </p>
             {scanError && (
               <p className="mt-2 text-xs font-medium text-clay">{scanError}</p>
             )}
@@ -841,7 +807,7 @@ export default function LocationBuilder({
             {ghosts.length > 0 && (
               <>
                 <p className="mt-4 font-serif text-lg">
-                  {ghosts.length} KIOSK{ghosts.length === 1 ? "" : "S"} FOUND
+                  {ghosts.length} FOUND
                 </p>
                 <p className="text-xs text-ink/50">{selectedCount} selected</p>
                 <div className="mt-2 max-h-40 space-y-1 overflow-y-auto">
@@ -861,8 +827,8 @@ export default function LocationBuilder({
                           onChange={() => toggleGhost(g.external_ref)}
                           className="h-4 w-4 shrink-0 accent-clay"
                         />
-                        <span className="shrink-0 font-mono text-clay">
-                          K-{String(i + 1).padStart(3, "0")}
+                        <span className="shrink-0 font-mono uppercase text-clay">
+                          {g.preset_id}-{String(i + 1).padStart(3, "0")}
                         </span>
                         <span className="min-w-0 flex-1 truncate text-ink/80">
                           {g.location_name}

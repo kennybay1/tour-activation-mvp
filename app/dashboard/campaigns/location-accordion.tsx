@@ -7,6 +7,7 @@ import {
   RADIUS_STRONG_WARN_BELOW,
 } from "@/lib/campaign-schema";
 import { type BuilderLocation } from "./location-types";
+import { getPreset } from "@/lib/preset-registry";
 
 // Rendering all rows plainly is fine up to the ~100-location cap this app
 // enforces elsewhere — collapsed rows are cheap. This page-size just keeps
@@ -185,9 +186,12 @@ const LocationRow = memo(function LocationRow({
                 Overlaps another circle — nearest wins.
               </p>
             )}
-            {location.source === "preset:k6" && (
+            {location.source.startsWith("preset:") && (
               <p className="text-xs text-ink/40">
-                From phone-box scan
+                From{" "}
+                {getPreset(location.source.slice("preset:".length))?.label ??
+                  "preset"}{" "}
+                scan
                 {location.external_ref ? ` · ${location.external_ref}` : ""}
               </p>
             )}

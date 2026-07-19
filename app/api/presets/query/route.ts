@@ -1,39 +1,33 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/supabase-server";
 import { supabaseAdmin } from "@/lib/supabase-admin";
+import { getPreset, type PresetBounds } from "@/lib/preset-registry";
 
 // Overpass' free instance is a shared community resource with an
 // acceptable-use policy — this route exists so the browser never talks to
-// it directly, and so identical scans are served from cache instead of
-// re-querying. Keep this in sync with the Vercel function config below.
+// it directly, and so overlapping viewport scans are served from cache
+// instead of re-querying. Keep maxDuration in sync with the Overpass
+// timeout below (10s) plus auth/cache overhead.
 export const maxDuration = 15;
 
 const OVERPASS_URL = "https://overpass-api.de/api/interpreter";
 const OVERPASS_TIMEOUT_MS = 10_000;
 const CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
-const MAX_RESULTS = 200;
-const MIN_RADIUS = 100;
-const MAX_RADIUS = 5000;
+// A viewport much bigger than a city district returns too much to be
+// useful and leans too hard on Overpass — the client shows "zoom in".
+const MAX_AREA_KM2 = 100;
 
-type Kiosk = {
+type PresetLocation = {
   lat: number;
   lng: number;
   location_name: string;
   external_ref: string;
-  design: string | null;
+  preset_id: string;
 };
 
-type PresetResponse = { locations: Kiosk[]; cached: boolean } | { error: string };
-
-function overpassQuery(lat: number, lng: number, radius: number): string {
-  return `[out:json][timeout:10];
-(
-  node["amenity"="telephone"]["design"~"^K[0-9]+$",i](around:${radius},${lat},${lng});
-  node["disused:amenity"="telephone"]["design"~"^K[0-9]+$",i](around:${radius},${lat},${lng});
-  node["amenity"="telephone"]["colour"~"red",i](around:${radius},${lat},${lng});
-);
-out body ${MAX_RESULTS};`;
-}
+type PresetResponse =
+  | { locations: PresetLocation[]; cached: boolean }
+  | { error: string };
 
 type OverpassElement = {
   type: string;
@@ -43,26 +37,28 @@ type OverpassElement = {
   tags?: Record<string, string>;
 };
 
-function mapElements(elements: OverpassElement[]): Kiosk[] {
-  const byId = new Map<number, Kiosk>();
-  for (const el of elements) {
-    if (el.type !== "node" || el.lat == null || el.lon == null) continue;
-    if (byId.has(el.id)) continue;
-    const tags = el.tags ?? {};
-    const design = tags.design ?? null;
-    const name =
-      tags.name ??
-      (design ? `${design} Kiosk — ${el.id}` : `Telephone Kiosk — ${el.id}`);
-    byId.set(el.id, {
-      lat: el.lat,
-      lng: el.lon,
-      location_name: name,
-      external_ref: `osm:node:${el.id}`,
-      design,
-    });
-    if (byId.size >= MAX_RESULTS) break;
-  }
-  return Array.from(byId.values());
+function isFiniteInRange(v: unknown, min: number, max: number): v is number {
+  return typeof v === "number" && Number.isFinite(v) && v >= min && v <= max;
+}
+
+function boundsAreaKm2(b: PresetBounds): number {
+  const KM_PER_DEG = 111.32;
+  const heightKm = (b.north - b.south) * KM_PER_DEG;
+  const midLatRad = ((b.north + b.south) / 2) * (Math.PI / 180);
+  const widthKm = (b.east - b.west) * KM_PER_DEG * Math.cos(midLatRad);
+  return heightKm * widthKm;
+}
+
+// Round bounds OUTWARD to a 2-decimal-place grid (~1.1km). Scanning and
+// caching the slightly larger quantized box means a small pan re-hits the
+// cached superset instead of refetching from Overpass.
+function quantizeOutward(b: PresetBounds): PresetBounds {
+  return {
+    south: Math.floor(b.south * 100) / 100,
+    west: Math.floor(b.west * 100) / 100,
+    north: Math.ceil(b.north * 100) / 100,
+    east: Math.ceil(b.east * 100) / 100,
+  };
 }
 
 export async function POST(
@@ -81,40 +77,41 @@ export async function POST(
     return NextResponse.json({ error: "invalid_json" }, { status: 400 });
   }
 
-  const { lat, lng, radius } = body as {
-    lat?: unknown;
-    lng?: unknown;
-    radius?: unknown;
+  const { preset_id, bounds } = body as {
+    preset_id?: unknown;
+    bounds?: unknown;
   };
 
-  if (
-    typeof lat !== "number" ||
-    !Number.isFinite(lat) ||
-    lat < -90 ||
-    lat > 90
-  ) {
-    return NextResponse.json({ error: "invalid_lat" }, { status: 400 });
-  }
-  if (
-    typeof lng !== "number" ||
-    !Number.isFinite(lng) ||
-    lng < -180 ||
-    lng > 180
-  ) {
-    return NextResponse.json({ error: "invalid_lng" }, { status: 400 });
-  }
-  if (
-    typeof radius !== "number" ||
-    !Number.isInteger(radius) ||
-    radius < MIN_RADIUS ||
-    radius > MAX_RADIUS
-  ) {
-    return NextResponse.json({ error: "invalid_radius" }, { status: 400 });
+  const preset = typeof preset_id === "string" ? getPreset(preset_id) : null;
+  if (!preset) {
+    return NextResponse.json({ error: "unknown_preset" }, { status: 400 });
   }
 
-  const latR = lat.toFixed(3);
-  const lngR = lng.toFixed(3);
-  const queryKey = `k6:${latR}:${lngR}:${radius}`;
+  const b = (bounds ?? {}) as Record<string, unknown>;
+  if (
+    !isFiniteInRange(b.south, -90, 90) ||
+    !isFiniteInRange(b.north, -90, 90) ||
+    !isFiniteInRange(b.west, -180, 180) ||
+    !isFiniteInRange(b.east, -180, 180) ||
+    b.south >= b.north ||
+    b.west >= b.east
+  ) {
+    return NextResponse.json({ error: "invalid_bounds" }, { status: 400 });
+  }
+  const rawBounds: PresetBounds = {
+    south: b.south,
+    west: b.west,
+    north: b.north,
+    east: b.east,
+  };
+
+  if (boundsAreaKm2(rawBounds) > MAX_AREA_KM2) {
+    // Distinct code — the client shows "zoom in" rather than an error.
+    return NextResponse.json({ error: "area_too_large" }, { status: 400 });
+  }
+
+  const q = quantizeOutward(rawBounds);
+  const queryKey = `${preset.id}:bbox:${q.south.toFixed(2)}:${q.west.toFixed(2)}:${q.north.toFixed(2)}:${q.east.toFixed(2)}`;
   const db = supabaseAdmin();
 
   const { data: cached, error: cacheReadError } = await db
@@ -130,7 +127,7 @@ export async function POST(
     Date.now() - new Date(cached.created_at).getTime() < CACHE_MAX_AGE_MS
   ) {
     return NextResponse.json({
-      locations: cached.payload as Kiosk[],
+      locations: cached.payload as PresetLocation[],
       cached: true,
     });
   }
@@ -140,14 +137,15 @@ export async function POST(
 
   let overpassRes: Response;
   try {
+    // The QUANTIZED bounds are what's actually queried — the cached payload
+    // must cover the whole grid cell it's keyed by, not just this viewport.
     overpassRes = await fetch(OVERPASS_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent":
-          "Moments (geo-fenced fan engagement platform; contact: kennybay@hotmail.co.uk)",
+        "User-Agent": `Moments (geo-fenced fan engagement platform; contact: ${process.env.APP_CONTACT_EMAIL ?? "not-configured"})`,
       },
-      body: `data=${encodeURIComponent(overpassQuery(lat, lng, radius))}`,
+      body: `data=${encodeURIComponent(preset.buildQuery(q))}`,
       signal: controller.signal,
     });
   } catch (err) {
@@ -195,7 +193,21 @@ export async function POST(
     );
   }
 
-  const locations = mapElements(json.elements ?? []);
+  // The union query can match one node under several tag clauses —
+  // deduplicate by OSM id.
+  const byId = new Map<number, PresetLocation>();
+  for (const el of json.elements ?? []) {
+    if (el.type !== "node" || el.lat == null || el.lon == null) continue;
+    if (byId.has(el.id)) continue;
+    byId.set(el.id, {
+      lat: el.lat,
+      lng: el.lon,
+      location_name: el.tags?.name ?? preset.fallbackName(el.id),
+      external_ref: `osm:node:${el.id}`,
+      preset_id: preset.id,
+    });
+  }
+  const locations = Array.from(byId.values());
 
   // Only successful, parsed responses are cached — a failure must never
   // poison the cache for the next attempt.
