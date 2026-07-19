@@ -87,14 +87,24 @@ function markerIcon(n: number, selected: boolean, hovered: boolean): L.DivIcon {
 }
 
 // Outline-only square, no fill, no geofence circle — visually unmistakable
-// from an activated (filled circular) marker. One shared instance: divIcons
-// are stateless and there can be hundreds of dormant nodes at once.
-const DORMANT_ICON = L.divIcon({
-  className: "",
-  html: `<div class="moment-marker-dormant"></div>`,
-  iconSize: [20, 20],
-  iconAnchor: [10, 10],
-});
+// from an activated (filled circular) marker, tinted per preset so mixed
+// layers stay tellable-apart. Cached per preset: divIcons are stateless
+// and there can be hundreds of dormant nodes at once.
+const dormantIconCache = new Map<string, L.DivIcon>();
+function dormantIconFor(presetId: string): L.DivIcon {
+  let icon = dormantIconCache.get(presetId);
+  if (!icon) {
+    const color = getPreset(presetId)?.markerColor ?? "#1b2e24";
+    icon = L.divIcon({
+      className: "",
+      html: `<div class="moment-marker-dormant" style="border-color:${color}"></div>`,
+      iconSize: [20, 20],
+      iconAnchor: [10, 10],
+    });
+    dormantIconCache.set(presetId, icon);
+  }
+  return icon;
+}
 
 // Memoized so pans/selection changes don't re-render hundreds of dormant
 // markers. Left-click activates; right-click is deliberately inert on
@@ -109,7 +119,7 @@ const DormantNode = memo(function DormantNode({
   return (
     <Marker
       position={[node.lat, node.lng]}
-      icon={DORMANT_ICON}
+      icon={dormantIconFor(node.preset_id)}
       eventHandlers={{
         click: (e) => {
           L.DomEvent.stopPropagation(e);
@@ -629,7 +639,7 @@ export default function LocationBuilder({
     // Same cap the server enforces — checked here first so a zoomed-out
     // map shows "zoom in" without a doomed request. Existing nodes stay.
     if (boundsAreaKm2(bounds) > MAX_PRESET_AREA_KM2) {
-      setLayerNotice("Zoom in to load kiosks.");
+      setLayerNotice("Zoom in to load presets.");
       return;
     }
     layerAbortRef.current?.abort();
@@ -648,12 +658,15 @@ export default function LocationBuilder({
           });
           const json = await res.json();
           if (!res.ok) {
+            const noun = getPreset(id)?.countNoun ?? "presets";
             throw new Error(
               json.error === "area_too_large"
-                ? "Zoom in to load kiosks."
-                : typeof json.error === "string" && json.error.includes(" ")
-                  ? json.error
-                  : "Couldn't load preset nodes. Try again."
+                ? `Zoom in to load ${noun}.`
+                : json.error === "too_dense"
+                  ? `Zoom in — too many ${noun} in view to show at once.`
+                  : typeof json.error === "string" && json.error.includes(" ")
+                    ? json.error
+                    : "Couldn't load preset nodes. Try again."
             );
           }
           return json.locations as PresetNode[];

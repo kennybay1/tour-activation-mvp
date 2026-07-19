@@ -195,6 +195,13 @@ const LocationRow = memo(function LocationRow({
                 {location.external_ref ? ` · ${location.external_ref}` : ""}
               </p>
             )}
+            {location.source.startsWith("preset:") &&
+              getPreset(location.source.slice("preset:".length))
+                ?.defaultRadius === 250 && (
+                <p className="text-xs text-ink/50">
+                  Larger radius set because GPS is unreliable indoors.
+                </p>
+              )}
             {location.source === "search" && (
               <p className="text-xs text-ink/40">
                 From search

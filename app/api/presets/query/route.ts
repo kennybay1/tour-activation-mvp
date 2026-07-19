@@ -5,6 +5,7 @@ import {
   getPreset,
   boundsAreaKm2,
   MAX_PRESET_AREA_KM2,
+  PRESET_DENSITY_LIMIT,
   type PresetBounds,
 } from "@/lib/preset-registry";
 
@@ -31,11 +32,14 @@ type PresetResponse =
   | { locations: PresetLocation[]; cached: boolean }
   | { error: string };
 
+// nwr queries return nodes (own lat/lon) plus ways and relations, whose
+// coordinates arrive via `out center` as a centroid.
 type OverpassElement = {
   type: string;
   id: number;
   lat?: number;
   lon?: number;
+  center?: { lat: number; lon: number };
   tags?: Record<string, string>;
 };
 
@@ -188,20 +192,35 @@ export async function POST(
   }
 
   // The union query can match one node under several tag clauses —
-  // deduplicate by OSM id.
-  const byId = new Map<number, PresetLocation>();
+  // deduplicate by type+id — node, way and relation ids are separate
+  // OSM id-spaces, and a station matching two clauses arrives twice.
+  const byRef = new Map<string, PresetLocation>();
   for (const el of json.elements ?? []) {
-    if (el.type !== "node" || el.lat == null || el.lon == null) continue;
-    if (byId.has(el.id)) continue;
-    byId.set(el.id, {
-      lat: el.lat,
-      lng: el.lon,
+    if (el.type !== "node" && el.type !== "way" && el.type !== "relation") {
+      continue;
+    }
+    const lat = el.lat ?? el.center?.lat;
+    const lng = el.lon ?? el.center?.lon;
+    if (lat == null || lng == null) continue;
+    const ref = `osm:${el.type}:${el.id}`;
+    if (byRef.has(ref)) continue;
+    byRef.set(ref, {
+      lat,
+      lng,
       location_name: el.tags?.name ?? preset.fallbackName(el.id),
-      external_ref: `osm:node:${el.id}`,
+      external_ref: ref,
       preset_id: preset.id,
     });
   }
-  const locations = Array.from(byId.values());
+
+  // Density guard: the query asks Overpass for one element beyond the
+  // limit — reaching it means this viewport is too dense to be useful.
+  // The client shows "zoom in" instead of a degraded, flooded map. Never
+  // cached, so zooming in retries cleanly.
+  if (byRef.size > PRESET_DENSITY_LIMIT) {
+    return NextResponse.json({ error: "too_dense" }, { status: 400 });
+  }
+  const locations = Array.from(byRef.values());
 
   // Only successful, parsed responses are cached — a failure must never
   // poison the cache for the next attempt.
