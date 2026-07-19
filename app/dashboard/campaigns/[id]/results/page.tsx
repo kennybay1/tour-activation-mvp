@@ -33,7 +33,7 @@ export default async function OrganiserResultsPage({
 
   const { data: campaign } = await supabase
     .from("campaigns")
-    .select("id, slug, title, artist_name, ticket_url")
+    .select("id, slug, title, artist_name, ticket_url, expired_link_url")
     .eq("id", id)
     .maybeSingle();
   if (!campaign) notFound();
@@ -64,6 +64,23 @@ export default async function OrganiserResultsPage({
     emailRows?.filter((r) => r.email_source === "near_miss").length ?? 0;
   const consentedContacts =
     emailRows?.filter((r) => r.marketing_consent).length ?? 0;
+
+  // Post-expiry traffic — late arrivals and follow-throughs on the custom
+  // "after it ends" link. Distinct sessions, so reloads don't inflate.
+  const { data: expiredEvents } = await supabase
+    .from("events")
+    .select("event_type, session_id")
+    .eq("campaign_id", campaign.id)
+    .in("event_type", ["expired_view", "expired_link_click"])
+    .limit(5000);
+  const distinctSessions = (type: string) =>
+    new Set(
+      (expiredEvents ?? [])
+        .filter((e) => e.event_type === type && e.session_id)
+        .map((e) => e.session_id)
+    ).size;
+  const expiredViews = distinctSessions("expired_view");
+  const expiredLinkClicks = distinctSessions("expired_link_click");
 
   // "High intent, didn't make it" — fans who couldn't reach the spot but
   // left an email on the out-of-range screen.
@@ -166,6 +183,22 @@ export default async function OrganiserResultsPage({
           )}
         </div>
       )}
+
+      <div className="mt-10">
+        <h2 className="font-serif text-2xl">After it ended</h2>
+        <p className="mt-1 text-sm text-ink/50">
+          Fans who arrived after the campaign closed
+          {campaign.expired_link_url
+            ? " — and how many followed your link on."
+            : "."}
+        </p>
+        <div className="mt-4 grid grid-cols-2 border-b border-r border-ink/25 sm:max-w-md">
+          <Stat label="Post-expiry views" value={expiredViews} />
+          {campaign.expired_link_url && (
+            <Stat label="Custom link clicks" value={expiredLinkClicks} />
+          )}
+        </div>
+      </div>
 
       {(locs?.length ?? 0) > 0 && (
         <div className="mt-10">

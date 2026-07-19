@@ -39,6 +39,10 @@ export type OrganiserFormValues = {
   ticket_url: string;
   startsLocal: string;
   endsLocal: string;
+  expired_headline: string;
+  expired_message: string;
+  expired_link_url: string;
+  expired_link_label: string;
 };
 
 const EMPTY: OrganiserFormValues = {
@@ -52,6 +56,10 @@ const EMPTY: OrganiserFormValues = {
   ticket_url: "",
   startsLocal: "",
   endsLocal: "",
+  expired_headline: "",
+  expired_message: "",
+  expired_link_url: "",
+  expired_link_label: "",
 };
 
 function localToIso(local: string): string {
@@ -73,12 +81,45 @@ function isoToLocal(iso?: string): string {
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
 const ALLOWED_FILE_RE = /\.(mp3|m4a|mp4|jpg|jpeg|png|webp)$/i;
 
+const BG_MAX_BYTES = 8 * 1024 * 1024;
+const BG_ALLOWED_RE = /\.(jpg|jpeg|png|webp)$/i;
+// Fans load the background on mobile data at the very top of the funnel —
+// anything bigger than this on the long edge gets downscaled and
+// re-encoded before upload.
+const BG_MAX_EDGE = 2400;
+
 function sanitizeFilename(name: string): string {
   return name
     .toLowerCase()
     .replace(/[^a-z0-9.]+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
+}
+
+// Downscale to BG_MAX_EDGE and re-encode as WebP (JPEG where WebP encoding
+// isn't supported). Runs at pick time so the preview shows exactly what
+// will be uploaded, and saving stays fast.
+async function processBackgroundImage(
+  file: File
+): Promise<{ blob: Blob; ext: string }> {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, BG_MAX_EDGE / Math.max(bitmap.width, bitmap.height));
+  const w = Math.max(1, Math.round(bitmap.width * scale));
+  const h = Math.max(1, Math.round(bitmap.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return { blob: file, ext: file.name.split(".").pop() ?? "jpg" };
+  ctx.drawImage(bitmap, 0, 0, w, h);
+  bitmap.close();
+  const encode = (type: string) =>
+    new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, type, 0.85));
+  const webp = await encode("image/webp");
+  if (webp && webp.type === "image/webp") return { blob: webp, ext: "webp" };
+  const jpeg = await encode("image/jpeg");
+  if (jpeg) return { blob: jpeg, ext: "jpg" };
+  return { blob: file, ext: file.name.split(".").pop() ?? "jpg" };
 }
 
 function validateLocations(
@@ -122,6 +163,7 @@ export default function OrganiserCampaignForm({
   startsIso,
   endsIso,
   storagePath: initialStoragePath,
+  backgroundPath: initialBackgroundPath,
   initialLocations,
 }: {
   campaignId?: string;
@@ -129,6 +171,7 @@ export default function OrganiserCampaignForm({
   startsIso?: string;
   endsIso?: string;
   storagePath?: string | null;
+  backgroundPath?: string | null;
   initialLocations?: BuilderLocation[];
 }) {
   const router = useRouter();
@@ -185,6 +228,64 @@ export default function OrganiserCampaignForm({
   const onLocationsChange = (next: BuilderLocation[]) => {
     markDirty();
     setLocations(next);
+  };
+
+  // Background image: mirrors the reward-file pattern — the processed blob
+  // waits in state and uploads on save, once a campaign id exists.
+  const [bgPath, setBgPath] = useState<string | null>(
+    initialBackgroundPath ?? null
+  );
+  const [bgBlob, setBgBlob] = useState<{ blob: Blob; ext: string } | null>(null);
+  const [bgPreviewUrl, setBgPreviewUrl] = useState<string | null>(null);
+  const [bgError, setBgError] = useState<string | null>(null);
+  const [bgProcessing, setBgProcessing] = useState(false);
+  const originalBgPath = initialBackgroundPath ?? null;
+
+  const bgPublicUrl = (path: string) =>
+    `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/backgrounds/${path}`;
+  // What the preview should show right now: a freshly picked image, else
+  // the saved one.
+  const bgDisplayUrl =
+    bgPreviewUrl ?? (bgPath ? bgPublicUrl(bgPath) : null);
+
+  const onPickBackground = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    e.target.value = "";
+    if (!f) return;
+    setBgError(null);
+    if (!BG_ALLOWED_RE.test(f.name)) {
+      setBgError("Use a JPG, PNG or WebP image.");
+      return;
+    }
+    if (f.size > BG_MAX_BYTES) {
+      setBgError("That image is over 8MB.");
+      return;
+    }
+    setBgProcessing(true);
+    try {
+      const processed = await processBackgroundImage(f);
+      markDirty();
+      setBgBlob(processed);
+      setBgPreviewUrl((old) => {
+        if (old) URL.revokeObjectURL(old);
+        return URL.createObjectURL(processed.blob);
+      });
+    } catch {
+      setBgError("Couldn't read that image — try a different file.");
+    } finally {
+      setBgProcessing(false);
+    }
+  };
+
+  const clearBackground = () => {
+    markDirty();
+    setBgBlob(null);
+    setBgPreviewUrl((old) => {
+      if (old) URL.revokeObjectURL(old);
+      return null;
+    });
+    setBgPath(null);
+    setBgError(null);
   };
 
   useEffect(() => {
@@ -270,6 +371,10 @@ export default function OrganiserCampaignForm({
       ticket_url: values.ticket_url.trim() || null,
       starts_at: payload.starts_at,
       ends_at: payload.ends_at,
+      expired_headline: values.expired_headline.trim() || null,
+      expired_message: values.expired_message.trim() || null,
+      expired_link_url: values.expired_link_url.trim() || null,
+      expired_link_label: values.expired_link_label.trim() || null,
     };
 
     // RLS: inserts must carry the signed-in user's id; updates only match
@@ -399,6 +504,52 @@ export default function OrganiserCampaignForm({
       }
     }
 
+    // Background image changes — PUBLIC backgrounds bucket, never rewards.
+    // A timestamped name means a replacement gets a fresh URL instead of a
+    // stale cached copy of the old object.
+    let newBgPath: string | null | undefined = undefined;
+    if (bgBlob) {
+      newBgPath = `${user.id}/${savedId}/background-${Date.now()}.${bgBlob.ext}`;
+    } else if (originalBgPath && !bgPath) {
+      newBgPath = null; // organiser pressed Remove
+    }
+
+    if (bgBlob && newBgPath) {
+      setBusyLabel("Uploading background…");
+      const { error: bgUploadError } = await supabase.storage
+        .from("backgrounds")
+        .upload(newBgPath, bgBlob.blob, {
+          upsert: true,
+          contentType: bgBlob.blob.type,
+        });
+      if (bgUploadError) {
+        setErrors({
+          _form:
+            "The campaign saved, but the background upload failed — try again from Edit.",
+        });
+        setBusy(false);
+        setBusyLabel("Saving…");
+        return;
+      }
+    }
+
+    if (newBgPath !== undefined) {
+      const { error: bgPathError } = await supabase
+        .from("campaigns")
+        .update({ background_image_path: newBgPath })
+        .eq("id", savedId);
+      if (bgPathError) {
+        setErrors({ _form: "Couldn't attach the background image. Try again." });
+        setBusy(false);
+        setBusyLabel("Saving…");
+        return;
+      }
+      // Replacing or removing deletes the old object; best-effort only.
+      if (originalBgPath && originalBgPath !== newBgPath) {
+        await supabase.storage.from("backgrounds").remove([originalBgPath]);
+      }
+    }
+
     // Everything's persisted — leaving is no longer a loss.
     guard?.setDirty(false);
     router.push("/dashboard");
@@ -466,6 +617,68 @@ export default function OrganiserCampaignForm({
           value={values.description}
           onChange={(e) => set("description", e.target.value)}
         />
+      </Field>
+
+      <Field
+        label="Background image (optional)"
+        error={bgError ?? undefined}
+        hint="A landscape photo at least 2000px wide works best. Busy images can make text hard to read — check the preview below. JPG, PNG or WebP, up to 8MB."
+      >
+        {bgDisplayUrl ? (
+          <div>
+            {/* Live preview of the fan page treatment: full-bleed image,
+                edge scrim, and the translucent panel fan copy sits in — so
+                legibility can be judged before publishing. */}
+            <div className="relative h-72 overflow-hidden rounded-2xl border border-ink/25">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={bgDisplayUrl}
+                alt="Background preview"
+                className="absolute inset-0 h-full w-full object-cover"
+              />
+              <div className="absolute inset-0 bg-gradient-to-b from-black/25 via-black/10 to-black/35" />
+              <div className="absolute inset-x-6 top-1/2 -translate-y-1/2 rounded-2xl bg-cream/90 p-4 text-center shadow-xl backdrop-blur-md">
+                <p className="text-[10px] font-medium uppercase tracking-[0.3em] text-clay">
+                  {values.artist_name || "Artist name"}
+                </p>
+                <p className="mt-1 font-serif text-lg leading-snug text-ink">
+                  {values.title || "Campaign title"}
+                </p>
+                <p className="mt-1 font-mono text-[10px] text-ink/50">
+                  Ends in <span className="text-clay">2d 4h 10m</span>
+                </p>
+              </div>
+            </div>
+            <div className="mt-2 flex gap-2">
+              <label className="cursor-pointer rounded-full border border-ink/30 px-3 py-1.5 text-xs font-medium text-ink/70 transition hover:border-ink/60">
+                Replace
+                <input
+                  type="file"
+                  accept=".jpg,.jpeg,.png,.webp"
+                  className="hidden"
+                  onChange={onPickBackground}
+                />
+              </label>
+              <button
+                type="button"
+                onClick={clearBackground}
+                className="rounded-full border border-ink/30 px-3 py-1.5 text-xs font-medium text-ink/70 transition hover:border-ink/60"
+              >
+                Remove
+              </button>
+            </div>
+          </div>
+        ) : (
+          <label className="flex cursor-pointer items-center justify-center rounded-xl border border-dashed border-ink/35 px-4 py-6 text-sm font-medium text-ink/60 transition hover:border-ink/60">
+            {bgProcessing ? "Preparing image…" : "Upload a background image"}
+            <input
+              type="file"
+              accept=".jpg,.jpeg,.png,.webp"
+              className="hidden"
+              onChange={onPickBackground}
+            />
+          </label>
+        )}
       </Field>
 
       <div>
@@ -585,6 +798,56 @@ export default function OrganiserCampaignForm({
             onChange={(e) => set("endsLocal", e.target.value)}
           />
         </Field>
+      </div>
+
+      <div className="rounded-2xl border border-ink/25 p-5">
+        <p className="text-xs font-medium uppercase tracking-[0.15em] text-ink/60">
+          After it ends (optional)
+        </p>
+        <p className="mt-1 text-xs text-ink/50">
+          What fans see if they arrive after the campaign has ended. Left
+          blank, they get the default &ldquo;This drop has ended&rdquo;
+          message.
+        </p>
+        <div className="mt-4 space-y-4">
+          <Field label="Headline" error={errors.expired_headline}>
+            <input
+              className={inputCls}
+              value={values.expired_headline}
+              onChange={(e) => set("expired_headline", e.target.value)}
+              placeholder="You missed this one…"
+            />
+          </Field>
+          <Field label="Message" error={errors.expired_message}>
+            <textarea
+              className={inputCls}
+              rows={2}
+              value={values.expired_message}
+              onChange={(e) => set("expired_message", e.target.value)}
+              placeholder="But the tour rolls on — catch the next drop."
+            />
+          </Field>
+          <Field label="Link URL" error={errors.expired_link_url}>
+            <input
+              className={inputCls}
+              value={values.expired_link_url}
+              onChange={(e) => set("expired_link_url", e.target.value)}
+              placeholder="https://linktr.ee/…"
+            />
+          </Field>
+          <Field
+            label="Link label"
+            error={errors.expired_link_label}
+            hint="Required when a link URL is given — it's the button text."
+          >
+            <input
+              className={inputCls}
+              value={values.expired_link_label}
+              onChange={(e) => set("expired_link_label", e.target.value)}
+              placeholder="Follow the tour"
+            />
+          </Field>
+        </div>
       </div>
 
       <div className="flex gap-3 pt-2">

@@ -20,6 +20,12 @@ export type CampaignInput = {
   starts_at: string; // ISO string
   ends_at: string; // ISO string
   is_active: boolean;
+  // "After it ends" customisation — all optional; blank means fans who
+  // arrive late see the default expired copy.
+  expired_headline?: string;
+  expired_message?: string;
+  expired_link_url?: string;
+  expired_link_label?: string;
 };
 
 export type LocationRowInput = {
@@ -86,6 +92,16 @@ export function validateCampaignCore(
   if (input.reward_content_url && !isValidHttpUrl(input.reward_content_url)) {
     errors.reward_content_url =
       "Enter a valid URL starting with http:// or https://.";
+  }
+
+  const expiredUrl = (input.expired_link_url ?? "").trim();
+  if (expiredUrl && !isValidHttpUrl(expiredUrl)) {
+    errors.expired_link_url =
+      "Enter a valid URL starting with http:// or https://.";
+  }
+  // A URL with no label would render an unlabelled button — require both.
+  if (expiredUrl && !(input.expired_link_label ?? "").trim()) {
+    errors.expired_link_label = "Add a label for the link button.";
   }
 
   const starts = Date.parse(input.starts_at);

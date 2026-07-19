@@ -8,6 +8,10 @@ const ALLOWED_EVENT_TYPES = [
   "location_error",
   "register",
   "ticket_click",
+  // Post-expiry traffic — a late arrival landing on the expired state, and
+  // a click on the campaign's custom "after it ends" link.
+  "expired_view",
+  "expired_link_click",
 ] as const;
 type AllowedEventType = (typeof ALLOWED_EVENT_TYPES)[number];
 

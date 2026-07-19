@@ -2,6 +2,7 @@
 
 import { Component, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
+import Image from "next/image";
 import { supabase } from "@/lib/supabase";
 import { directionsUrlFor } from "./directions";
 import { FAN_MAP_HEIGHT } from "./fan-map-constants";
@@ -55,6 +56,11 @@ type Campaign = {
   starts_at: string;
   ends_at: string;
   is_active: boolean;
+  expired_headline: string | null;
+  expired_message: string | null;
+  expired_link_url: string | null;
+  expired_link_label: string | null;
+  background_image_path: string | null;
 };
 
 type SpotLocation = {
@@ -135,6 +141,48 @@ function nearestOf(
     }
   }
   return { location: best, distanceM: bestDist };
+}
+
+// Full-viewport campaign background — fixed, cropped to fill, and faded in
+// only once loaded so it never blocks first paint. The dark edge gradient
+// plus the translucent cream panel the content sits in keep body text, the
+// distance counter and the countdown readable over any photograph, light
+// or dark.
+function FanBackground({ url }: { url: string }) {
+  const [loaded, setLoaded] = useState(false);
+  const imgRef = useRef<HTMLImageElement | null>(null);
+
+  // The load event can fire before hydration attaches React's onLoad (the
+  // SSR'd <img> starts downloading immediately), and a cached image can be
+  // complete before any listener exists. Checking .complete AND attaching
+  // a native listener in one effect covers every ordering.
+  useEffect(() => {
+    const img = imgRef.current;
+    if (!img) return;
+    if (img.complete && img.naturalWidth > 0) {
+      setLoaded(true);
+      return;
+    }
+    const onLoad = () => setLoaded(true);
+    img.addEventListener("load", onLoad);
+    return () => img.removeEventListener("load", onLoad);
+  }, [url]);
+
+  return (
+    <div className="fixed inset-0" aria-hidden="true">
+      <Image
+        ref={imgRef}
+        src={url}
+        alt=""
+        fill
+        sizes="100vw"
+        className={`object-cover transition-opacity duration-700 ${
+          loaded ? "opacity-100" : "opacity-0"
+        }`}
+      />
+      <div className="absolute inset-0 bg-gradient-to-b from-black/25 via-black/10 to-black/35" />
+    </div>
+  );
 }
 
 const primaryBtn =
@@ -640,6 +688,16 @@ export default function FanPage({ slug }: { slug: string }) {
     if (step === "loading" || step === "not_yet_started") setStep("landing");
   }, [now, campaign, endsAtMs, startsAtMs, step, stopWatching]);
 
+  // Post-expiry traffic: fire once per page load whether the fan landed on
+  // an already-ended campaign or it expired mid-session. The results page
+  // counts distinct sessions, so repeat loads don't inflate the metric.
+  const expiredViewTracked = useRef(false);
+  useEffect(() => {
+    if (step !== "expired" || !campaign || expiredViewTracked.current) return;
+    expiredViewTracked.current = true;
+    track("expired_view");
+  }, [step, campaign, track]);
+
   const copyCode = async () => {
     if (!reward?.discount_code) return;
     try {
@@ -669,9 +727,21 @@ export default function FanPage({ slug }: { slug: string }) {
   const canCheckAgain =
     !checking && Date.now() - lastClaimAttemptAtRef.current >= CLAIM_DEBOUNCE_MS;
 
+  const bgUrl = campaign?.background_image_path
+    ? `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/backgrounds/${campaign.background_image_path}`
+    : null;
+
   return (
-    <div className="grain min-h-dvh bg-cream font-sans text-ink">
-      <div className="mx-auto flex min-h-dvh w-full max-w-md flex-col px-5 py-8">
+    <div className="grain relative min-h-dvh bg-cream font-sans text-ink">
+      {bgUrl && <FanBackground url={bgUrl} />}
+      <div className={bgUrl ? "relative z-10 p-4 sm:p-6" : undefined}>
+        <div
+          className={`mx-auto flex w-full max-w-md flex-col ${
+            bgUrl
+              ? "min-h-[calc(100dvh-2rem)] rounded-3xl bg-cream/90 px-5 py-8 shadow-xl backdrop-blur-md sm:min-h-[calc(100dvh-3rem)]"
+              : "min-h-dvh px-5 py-8"
+          }`}
+        >
         {step === "loading" && (
           <Center>
             <div className="relative flex h-16 w-16 items-center justify-center">
@@ -695,17 +765,38 @@ export default function FanPage({ slug }: { slug: string }) {
         {step === "expired" && campaign && (
           <Center>
             <p className={eyebrow}>{campaign.artist_name}</p>
-            <h1 className="mt-4 font-serif text-4xl">This drop has ended</h1>
+            <p className="mt-2 text-sm text-ink/50">{campaign.title}</p>
+            <h1 className="mt-4 font-serif text-4xl">
+              {campaign.expired_headline || "This drop has ended"}
+            </h1>
             <p className="mt-3 text-ink/60">
-              Follow {campaign.artist_name} to catch the next one.
+              {campaign.expired_message ||
+                `Follow ${campaign.artist_name} to catch the next one.`}
             </p>
+            {campaign.expired_link_url && campaign.expired_link_label && (
+              <button
+                onClick={() => {
+                  track("expired_link_click");
+                  window.open(campaign.expired_link_url!, "_blank", "noopener");
+                }}
+                className={`mt-8 ${ticketBtn}`}
+              >
+                {campaign.expired_link_label}
+              </button>
+            )}
             {campaign.ticket_url && (
+              // Secondary beneath any custom link; the lone prominent
+              // action when there isn't one.
               <button
                 onClick={() => {
                   track("ticket_click");
                   window.open(campaign.ticket_url!, "_blank", "noopener");
                 }}
-                className={`mt-8 ${ticketBtn}`}
+                className={
+                  campaign.expired_link_url && campaign.expired_link_label
+                    ? "mt-3 w-full rounded-full border border-ink/30 py-4 text-lg font-medium text-ink/80 transition hover:border-ink/60 active:scale-[0.98]"
+                    : `mt-8 ${ticketBtn}`
+                }
               >
                 Get tickets
               </button>
@@ -1094,6 +1185,7 @@ export default function FanPage({ slug }: { slug: string }) {
           </a>{" "}
           — Be there.
         </p>
+        </div>
       </div>
     </div>
   );

@@ -44,6 +44,10 @@ export default async function EditCampaignPage({
     ticket_url: c.ticket_url ?? "",
     startsLocal: "",
     endsLocal: "",
+    expired_headline: c.expired_headline ?? "",
+    expired_message: c.expired_message ?? "",
+    expired_link_url: c.expired_link_url ?? "",
+    expired_link_label: c.expired_link_label ?? "",
   };
 
   // tempId reuses the DB id — stable across re-renders, and doubles as
@@ -72,6 +76,7 @@ export default async function EditCampaignPage({
         startsIso={c.starts_at}
         endsIso={c.ends_at}
         storagePath={c.reward_storage_path}
+        backgroundPath={c.background_image_path}
         initialLocations={initialLocations}
       />
     </div>
