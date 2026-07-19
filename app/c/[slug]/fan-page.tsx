@@ -51,7 +51,7 @@ type Campaign = {
   title: string;
   description: string | null;
   reward_teaser: string | null;
-  ticket_url: string;
+  ticket_url: string | null;
   starts_at: string;
   ends_at: string;
   is_active: boolean;
@@ -68,7 +68,9 @@ type SpotLocation = {
 type Reward = {
   reward_content_url: string | null;
   discount_code: string | null;
-  ticket_url: string;
+  // Omitted by the server when the campaign has no ticket link — the
+  // "Get tickets" button simply doesn't render.
+  ticket_url?: string;
   location_name: string | null;
 };
 
@@ -77,7 +79,6 @@ type Step =
   | "not_found"
   | "not_yet_started"
   | "landing"
-  | "register"
   | "locating"
   | "locked"
   | "unlocked"
@@ -88,6 +89,9 @@ type Step =
 
 const SESSION_KEY = "ta_session_id";
 const CLAIM_DEBOUNCE_MS = 15_000;
+// Once a fan submits or dismisses the email ask for a campaign, never
+// prompt them again on this device.
+const EMAIL_PROMPT_KEY_PREFIX = "ta_email_prompt_";
 
 function getSessionId(): string {
   try {
@@ -145,6 +149,137 @@ function CountdownLine({ label, msRemaining }: { label: string; msRemaining: num
       {label}{" "}
       <span className="font-medium text-clay">{formatCountdown(msRemaining)}</span>
     </p>
+  );
+}
+
+// Optional email capture, shown only AFTER the location check — post-unlock
+// as a dismissible card beneath the reward, or on the out-of-range screen
+// as a clearly secondary inline field. Never gates anything: the reward
+// stays fully usable whether or not an email is given.
+function EmailCaptureCard({
+  slug,
+  sessionId,
+  source,
+  artistName,
+  onDone,
+  onDismiss,
+}: {
+  slug: string;
+  sessionId: string;
+  source: "post_unlock" | "near_miss";
+  artistName: string;
+  onDone: () => void;
+  // Present only on the post-unlock variant — dismissible means dismissible.
+  onDismiss?: () => void;
+}) {
+  const [email, setEmail] = useState("");
+  const [consent, setConsent] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/claim/email", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          slug,
+          session_id: sessionId,
+          email,
+          marketing_consent: consent,
+          source,
+        }),
+      });
+      if (!res.ok) {
+        setError("That didn't go through — check the address and try again.");
+        return;
+      }
+      onDone();
+    } catch {
+      setError("That didn't go through — check your connection and try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form
+      onSubmit={submit}
+      className={
+        source === "post_unlock"
+          ? "rounded-2xl border border-ink/25 p-5"
+          : "rounded-2xl border border-ink/15 p-4"
+      }
+    >
+      <p
+        className={
+          source === "post_unlock"
+            ? "font-serif text-xl"
+            : "text-sm font-medium text-ink/80"
+        }
+      >
+        {source === "post_unlock"
+          ? `Stay close to ${artistName}`
+          : "Can't make it?"}
+      </p>
+      <p className="mt-1 text-sm text-ink/60">
+        {source === "post_unlock"
+          ? "Drop your email to hear about the next drop first."
+          : "We'll let you know about the next drop."}
+      </p>
+      <div className="mt-3 flex gap-2">
+        <input
+          type="email"
+          required
+          inputMode="email"
+          autoComplete="email"
+          placeholder="you@example.com"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          className="min-w-0 flex-1 rounded-xl border border-ink/30 bg-transparent px-4 py-2.5 text-ink placeholder-ink/30 outline-none focus:border-forest"
+        />
+        <button
+          type="submit"
+          disabled={busy}
+          className="shrink-0 rounded-full bg-forest-deep px-5 py-2.5 text-sm font-semibold text-parchment transition active:scale-[0.98] disabled:opacity-50"
+        >
+          {busy ? "…" : "Keep me posted"}
+        </button>
+      </div>
+      <label className="mt-3 flex items-start gap-2 text-xs text-ink/70">
+        <input
+          type="checkbox"
+          checked={consent}
+          onChange={(e) => setConsent(e.target.checked)}
+          className="mt-0.5 h-4 w-4 shrink-0 accent-forest"
+        />
+        <span>
+          I agree to receive marketing from {artistName} and their team (
+          <a
+            href="/privacy"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline underline-offset-2 hover:text-ink"
+          >
+            privacy
+          </a>
+          )
+        </span>
+      </label>
+      {error && <p className="mt-2 text-xs font-medium text-clay">{error}</p>}
+      {onDismiss && (
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="mt-3 text-xs font-medium text-ink/50 underline-offset-4 hover:underline"
+        >
+          No thanks
+        </button>
+      )}
+    </form>
   );
 }
 
@@ -221,13 +356,27 @@ export default function FanPage({ slug }: { slug: string }) {
   const [step, setStep] = useState<Step>("loading");
   const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [locations, setLocations] = useState<SpotLocation[]>([]);
-  const [email, setEmail] = useState("");
-  const [consent, setConsent] = useState(false);
   const [reward, setReward] = useState<Reward | null>(null);
   const [copied, setCopied] = useState(false);
   const [inApp, setInApp] = useState(false);
   const sessionRef = useRef<string>("");
   const viewTracked = useRef(false);
+
+  // Email is asked for AFTER the location check, never before. "done" =
+  // submitted (either variant), "dismissed" = declined the post-unlock
+  // card; both persist so a fan is never re-prompted on this device.
+  const [emailPrompt, setEmailPrompt] = useState<
+    "unset" | "done" | "dismissed"
+  >("unset");
+  const rememberEmailPrompt = useCallback(
+    (value: "done" | "dismissed", campaignId: string) => {
+      setEmailPrompt(value);
+      try {
+        localStorage.setItem(EMAIL_PROMPT_KEY_PREFIX + campaignId, value);
+      } catch {}
+    },
+    []
+  );
 
   // Countdown — every screen's "now" is corrected for client clock skew.
   const clockOffsetMs = useClockOffsetMs();
@@ -304,6 +453,14 @@ export default function FanPage({ slug }: { slug: string }) {
         if (cancelled) return;
         setCampaign(c);
         setLocations((locs as SpotLocation[]) ?? []);
+        try {
+          const remembered = localStorage.getItem(
+            EMAIL_PROMPT_KEY_PREFIX + c.id
+          );
+          if (remembered === "done" || remembered === "dismissed") {
+            setEmailPrompt(remembered);
+          }
+        } catch {}
         // Active/has-locations are structural, not time-based — everything
         // date-related (not-yet-started / landing / expired) is decided
         // reactively below, against corrected time, and self-corrects the
@@ -346,8 +503,6 @@ export default function FanPage({ slug }: { slug: string }) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             slug,
-            email,
-            marketing_consent: consent,
             lat,
             lng,
             accuracy,
@@ -385,7 +540,7 @@ export default function FanPage({ slug }: { slug: string }) {
         setChecking(false);
       }
     },
-    [slug, email, consent, stopWatching]
+    [slug, stopWatching]
   );
 
   const onPosition = useCallback(
@@ -485,12 +640,6 @@ export default function FanPage({ slug }: { slug: string }) {
     if (step === "loading" || step === "not_yet_started") setStep("landing");
   }, [now, campaign, endsAtMs, startsAtMs, step, stopWatching]);
 
-  const onRegister = (e: React.FormEvent) => {
-    e.preventDefault();
-    track("register", { marketing_consent: consent });
-    beginTracking();
-  };
-
   const copyCode = async () => {
     if (!reward?.discount_code) return;
     try {
@@ -550,15 +699,17 @@ export default function FanPage({ slug }: { slug: string }) {
             <p className="mt-3 text-ink/60">
               Follow {campaign.artist_name} to catch the next one.
             </p>
-            <button
-              onClick={() => {
-                track("ticket_click");
-                window.open(campaign.ticket_url, "_blank", "noopener");
-              }}
-              className={`mt-8 ${ticketBtn}`}
-            >
-              Get tickets
-            </button>
+            {campaign.ticket_url && (
+              <button
+                onClick={() => {
+                  track("ticket_click");
+                  window.open(campaign.ticket_url!, "_blank", "noopener");
+                }}
+                className={`mt-8 ${ticketBtn}`}
+              >
+                Get tickets
+              </button>
+            )}
           </Center>
         )}
 
@@ -623,9 +774,9 @@ export default function FanPage({ slug }: { slug: string }) {
 
             <div className="divide-y divide-ink/15 border-y border-ink/25">
               {[
-                ["01", "Drop your email"],
-                ["02", "Get yourself to the spot"],
-                ["03", "Unlock what's waiting there"],
+                ["01", "Get yourself to the spot"],
+                ["02", "Tap unlock when you're there"],
+                ["03", "Enjoy what's waiting"],
               ].map(([n, label]) => (
                 <div key={n} className="flex items-baseline gap-4 py-3">
                   <span className="font-mono text-xs text-clay">{n}</span>
@@ -634,86 +785,19 @@ export default function FanPage({ slug }: { slug: string }) {
               ))}
             </div>
 
-            {inAppBanner}
-
-            <div className="mt-auto pt-4">
-              <button onClick={() => setStep("register")} className={primaryBtn}>
-                I&apos;m ready
-              </button>
-            </div>
-          </div>
-        )}
-
-        {step === "register" && campaign && (
-          <form
-            onSubmit={onRegister}
-            className="fade-up flex flex-1 flex-col gap-6"
-          >
-            <div className="mt-2">
-              <p className={eyebrow}>{campaign.artist_name}</p>
-              <h1 className="mt-4 font-serif text-4xl">Almost there</h1>
-              <CountdownLine label="Ends in" msRemaining={endsAtMs - now} />
-              <p className="mt-3 text-ink/60">
-                Drop your email so we can let you in.
-              </p>
-            </div>
-
-            <div>
-              <label
-                htmlFor="email"
-                className="mb-2 block text-xs font-medium uppercase tracking-[0.2em] text-ink/60"
-              >
-                Email
-              </label>
-              <input
-                id="email"
-                type="email"
-                required
-                inputMode="email"
-                autoComplete="email"
-                placeholder="you@example.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="w-full rounded-xl border border-ink/30 bg-transparent px-5 py-4 text-lg text-ink placeholder-ink/30 outline-none focus:border-forest"
-              />
-            </div>
-
-            <label className="flex items-start gap-3 text-sm text-ink/80">
-              <input
-                type="checkbox"
-                checked={consent}
-                onChange={(e) => setConsent(e.target.checked)}
-                className="mt-0.5 h-5 w-5 shrink-0 accent-forest"
-              />
-              <span>
-                I agree to receive marketing from {campaign.artist_name} and
-                their team (
-                <a
-                  href="/privacy"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="underline underline-offset-2 hover:text-ink"
-                >
-                  privacy
-                </a>
-                )
-              </span>
-            </label>
-
             <p className="text-sm text-ink/50">
-              Next we&apos;ll ask for your location — it&apos;s only used to
-              check you&apos;re at the spot, and we never store your
-              coordinates.
+              We&apos;ll ask for your location — it&apos;s only used to check
+              you&apos;re at the spot, and we never store your coordinates.
             </p>
 
             {inAppBanner}
 
             <div className="mt-auto pt-4">
-              <button type="submit" className={primaryBtn}>
-                Continue
+              <button onClick={beginTracking} className={primaryBtn}>
+                I&apos;m here — unlock
               </button>
             </div>
-          </form>
+          </div>
         )}
 
         {step === "locating" && campaign && (
@@ -814,6 +898,23 @@ export default function FanPage({ slug }: { slug: string }) {
             >
               {checking ? "Checking…" : "Check again"}
             </button>
+
+            {/* Clearly secondary, and always BELOW the distance counter,
+                countdown and locations — those stay the primary content. */}
+            {emailPrompt !== "done" ? (
+              <EmailCaptureCard
+                slug={slug}
+                sessionId={sessionRef.current}
+                source="near_miss"
+                artistName={campaign.artist_name}
+                onDone={() => rememberEmailPrompt("done", campaign.id)}
+              />
+            ) : (
+              <p className="text-center text-sm text-ink/50">
+                You&apos;re on the list — we&apos;ll let you know about the
+                next drop.
+              </p>
+            )}
           </div>
         )}
 
@@ -877,17 +978,37 @@ export default function FanPage({ slug }: { slug: string }) {
               </div>
             )}
 
-            <div className="mt-auto pt-4">
-              <button
-                onClick={() => {
-                  track("ticket_click");
-                  window.open(reward.ticket_url, "_blank", "noopener");
-                }}
-                className={ticketBtn}
-              >
-                Get tickets
-              </button>
-            </div>
+            {/* Optional and dismissible — the fan already has the reward;
+                this is about staying close to the artist, never access. */}
+            {emailPrompt === "unset" && (
+              <EmailCaptureCard
+                slug={slug}
+                sessionId={sessionRef.current}
+                source="post_unlock"
+                artistName={campaign.artist_name}
+                onDone={() => rememberEmailPrompt("done", campaign.id)}
+                onDismiss={() => rememberEmailPrompt("dismissed", campaign.id)}
+              />
+            )}
+            {emailPrompt === "done" && (
+              <p className="text-center text-sm text-ink/50">
+                You&apos;re on the list. 🎉
+              </p>
+            )}
+
+            {reward.ticket_url && (
+              <div className="mt-auto pt-4">
+                <button
+                  onClick={() => {
+                    track("ticket_click");
+                    window.open(reward.ticket_url, "_blank", "noopener");
+                  }}
+                  className={ticketBtn}
+                >
+                  Get tickets
+                </button>
+              </div>
+            )}
           </div>
         )}
 

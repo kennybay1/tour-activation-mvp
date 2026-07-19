@@ -267,7 +267,7 @@ export default function OrganiserCampaignForm({
       reward_teaser: values.reward_teaser.trim() || null,
       reward_content_url: values.reward_content_url.trim() || null,
       discount_code: values.discount_code.trim() || null,
-      ticket_url: values.ticket_url.trim(),
+      ticket_url: values.ticket_url.trim() || null,
       starts_at: payload.starts_at,
       ends_at: payload.ends_at,
     };
@@ -555,7 +555,11 @@ export default function OrganiserCampaignForm({
         />
       </Field>
 
-      <Field label="Ticket URL" error={errors.ticket_url}>
+      <Field
+        label="Ticket URL (optional)"
+        error={errors.ticket_url}
+        hint='Adds a "Get tickets" call to action to the unlocked state. Leave blank if there&apos;s nothing to sell — the reward stands on its own.'
+      >
         <input
           className={inputCls}
           value={values.ticket_url}

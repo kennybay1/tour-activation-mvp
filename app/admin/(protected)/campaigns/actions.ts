@@ -23,7 +23,7 @@ function toRow(input: CampaignInput) {
     reward_teaser: input.reward_teaser.trim() || null,
     reward_content_url: input.reward_content_url.trim() || null,
     discount_code: input.discount_code.trim() || null,
-    ticket_url: input.ticket_url.trim(),
+    ticket_url: input.ticket_url.trim() || null,
     starts_at: new Date(input.starts_at).toISOString(),
     ends_at: new Date(input.ends_at).toISOString(),
     is_active: input.is_active,

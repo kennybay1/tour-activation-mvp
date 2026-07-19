@@ -395,7 +395,7 @@ export default function CampaignForm({
         />
       </Field>
 
-      <Field label="Ticket URL" error={errors.ticket_url}>
+      <Field label="Ticket URL (optional)" error={errors.ticket_url}>
         <input
           className={inputCls}
           value={values.ticket_url}

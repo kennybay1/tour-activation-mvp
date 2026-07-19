@@ -63,11 +63,13 @@ export function validateCampaignCore(
   input: CampaignInput
 ): Record<string, string> {
   const errors: Record<string, string> = {};
+  // ticket_url is optional — when present it powers the "Get tickets" call
+  // to action on the unlocked state; when absent the button is simply
+  // hidden. Format is still validated below whenever a value is given.
   const required: [keyof CampaignInput, string][] = [
     ["slug", "Slug is required."],
     ["artist_name", "Artist name is required."],
     ["title", "Title is required."],
-    ["ticket_url", "Ticket URL is required."],
   ];
   for (const [field, message] of required) {
     if (!String(input[field] ?? "").trim()) errors[field] = message;

@@ -48,14 +48,14 @@ export async function GET(
   if (type === "consented") {
     const { data, error } = await supabase
       .from("claims")
-      .select("email, consent_at, unlocked, ticket_clicked_at")
+      .select("email, email_source, consent_at, unlocked, ticket_clicked_at")
       .eq("campaign_id", campaign.id)
       .eq("marketing_consent", true)
       .order("consent_at", { ascending: true });
     if (error) {
       return NextResponse.json({ error: "server_error" }, { status: 500 });
     }
-    csv = toCsv(["email", "consent_at", "unlocked", "ticket_clicked_at"], data);
+    csv = toCsv(["email", "email_source", "consent_at", "unlocked", "ticket_clicked_at"], data);
   } else {
     const { data, error } = await supabase
       .from("claims")

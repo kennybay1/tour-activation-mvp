@@ -1,8 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const RATE_LIMIT_MAX_ATTEMPTS = 10;
+// Identity is the client-generated session id — email is no longer asked
+// for before the location check (it's requested after unlock, via
+// /api/claim/email). Raw coordinates are still used only for the distance
+// computation and never stored.
+
+const SESSION_RATE_LIMIT = 10;
+const IP_RATE_LIMIT = 30;
 const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 const MAX_ACCURACY_GRACE_M = 50;
 
@@ -10,7 +15,7 @@ type ClaimSuccess = {
   status: "unlocked" | "already_claimed";
   reward_content_url: string | null;
   discount_code: string | null;
-  ticket_url: string;
+  ticket_url?: string;
   location_name: string | null;
 };
 type ClaimResponse =
@@ -35,6 +40,12 @@ function haversineMeters(
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+function clientIp(req: NextRequest): string {
+  const fwd = req.headers.get("x-forwarded-for");
+  if (fwd) return fwd.split(",")[0].trim();
+  return req.headers.get("x-real-ip") ?? "unknown";
+}
+
 export async function POST(
   req: NextRequest
 ): Promise<NextResponse<ClaimResponse>> {
@@ -45,22 +56,23 @@ export async function POST(
     return NextResponse.json({ error: "invalid_json" }, { status: 400 });
   }
 
-  const { slug, email, marketing_consent, lat, lng, accuracy, session_id } =
-    body as {
-      slug?: unknown;
-      email?: unknown;
-      marketing_consent?: unknown;
-      lat?: unknown;
-      lng?: unknown;
-      accuracy?: unknown;
-      session_id?: unknown;
-    };
+  const { slug, lat, lng, accuracy, session_id } = body as {
+    slug?: unknown;
+    lat?: unknown;
+    lng?: unknown;
+    accuracy?: unknown;
+    session_id?: unknown;
+  };
 
   if (typeof slug !== "string" || slug.length === 0) {
     return NextResponse.json({ error: "invalid_slug" }, { status: 400 });
   }
-  if (typeof email !== "string" || !EMAIL_RE.test(email.trim())) {
-    return NextResponse.json({ error: "invalid_email" }, { status: 400 });
+  if (
+    typeof session_id !== "string" ||
+    session_id.length === 0 ||
+    session_id.length > 100
+  ) {
+    return NextResponse.json({ error: "invalid_session" }, { status: 400 });
   }
   if (
     typeof lat !== "number" ||
@@ -78,9 +90,8 @@ export async function POST(
     return NextResponse.json({ error: "invalid_location" }, { status: 400 });
   }
 
-  const normalizedEmail = email.trim().toLowerCase();
-  const sessionId = typeof session_id === "string" ? session_id : null;
-  const consent = marketing_consent === true;
+  const sessionId = session_id;
+  const ip = clientIp(req);
   const db = supabaseAdmin();
 
   const { data: campaign, error: campaignError } = await db
@@ -117,41 +128,54 @@ export async function POST(
     return NextResponse.json({ status: "expired" });
   }
 
-  // Rate limit: max 10 attempts per email per campaign in a 10-minute window,
-  // counted via claim_attempt events (works across serverless instances).
+  // Rate limits, counted via claim_attempt events (works across serverless
+  // instances): per session AND per IP, since a session id costs nothing to
+  // mint. The IP is recorded only in event metadata for this counting —
+  // never on the claim.
   const windowStart = new Date(now.getTime() - RATE_LIMIT_WINDOW_MS).toISOString();
-  const { count, error: countError } = await db
-    .from("events")
-    .select("id", { count: "exact", head: true })
-    .eq("campaign_id", campaign.id)
-    .eq("event_type", "claim_attempt")
-    .eq("metadata->>email", normalizedEmail)
-    .gte("created_at", windowStart);
-  if (countError) {
+  const [sessionCount, ipCount] = await Promise.all([
+    db
+      .from("events")
+      .select("id", { count: "exact", head: true })
+      .eq("campaign_id", campaign.id)
+      .eq("event_type", "claim_attempt")
+      .eq("session_id", sessionId)
+      .gte("created_at", windowStart),
+    db
+      .from("events")
+      .select("id", { count: "exact", head: true })
+      .eq("event_type", "claim_attempt")
+      .eq("metadata->>ip", ip)
+      .gte("created_at", windowStart),
+  ]);
+  if (sessionCount.error || ipCount.error) {
     return NextResponse.json({ error: "server_error" }, { status: 500 });
   }
-  if ((count ?? 0) >= RATE_LIMIT_MAX_ATTEMPTS) {
+  if (
+    (sessionCount.count ?? 0) >= SESSION_RATE_LIMIT ||
+    (ip !== "unknown" && (ipCount.count ?? 0) >= IP_RATE_LIMIT)
+  ) {
     return NextResponse.json({ error: "rate_limited" }, { status: 429 });
   }
   await db.from("events").insert({
     campaign_id: campaign.id,
     session_id: sessionId,
     event_type: "claim_attempt",
-    metadata: { email: normalizedEmail },
+    metadata: { ip },
   });
 
-  // Register the claim regardless of the location outcome.
+  // Register the claim regardless of the location outcome. Only identity
+  // and user agent are written here — the email fields belong to
+  // /api/claim/email and must survive repeat attempts untouched.
   const { data: claim, error: claimError } = await db
     .from("claims")
     .upsert(
       {
         campaign_id: campaign.id,
-        email: normalizedEmail,
-        marketing_consent: consent,
-        consent_at: consent ? now.toISOString() : null,
+        session_id: sessionId,
         user_agent: req.headers.get("user-agent"),
       },
-      { onConflict: "campaign_id,email" }
+      { onConflict: "campaign_id,session_id" }
     )
     .select("id, unlocked, unlocked_location_id")
     .single();
@@ -206,6 +230,14 @@ export async function POST(
     if (signed?.signedUrl) rewardContentUrl = signed.signedUrl;
   }
 
+  // ticket_url is optional — omitted from the payload entirely when the
+  // campaign has none, so the client never renders an empty CTA.
+  const successBase = {
+    reward_content_url: rewardContentUrl,
+    discount_code: campaign.discount_code,
+    ...(campaign.ticket_url ? { ticket_url: campaign.ticket_url } : {}),
+  };
+
   if (claim.unlocked) {
     // Name the location this fan ORIGINALLY unlocked at, not whichever is
     // nearest right now — those can differ if they're revisiting a
@@ -215,9 +247,7 @@ export async function POST(
     );
     return NextResponse.json({
       status: "already_claimed",
-      reward_content_url: rewardContentUrl,
-      discount_code: campaign.discount_code,
-      ticket_url: campaign.ticket_url,
+      ...successBase,
       location_name: originalLocation?.location_name ?? nearest.location_name,
     });
   }
@@ -245,9 +275,7 @@ export async function POST(
 
   return NextResponse.json({
     status: "unlocked",
-    reward_content_url: rewardContentUrl,
-    discount_code: campaign.discount_code,
-    ticket_url: campaign.ticket_url,
+    ...successBase,
     location_name: nearest.location_name,
   });
 }

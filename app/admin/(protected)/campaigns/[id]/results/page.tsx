@@ -10,7 +10,6 @@ type FunnelRow = {
   permission_granted: number;
   grant_rate_pct: number | null;
   permission_denied: number;
-  registrations: number;
   unlocks: number;
   out_of_range_attempts: number;
   ticket_clicks: number;
@@ -32,7 +31,7 @@ export default async function ResultsPage({
 
   const { data: campaign } = await db
     .from("campaigns")
-    .select("id, slug, title, artist_name")
+    .select("id, slug, title, artist_name, ticket_url")
     .eq("id", id)
     .maybeSingle();
   if (!campaign) notFound();
@@ -42,18 +41,34 @@ export default async function ResultsPage({
   const { data: funnel, error: funnelError } = (await db
     .from("funnel_summary")
     .select(
-      "page_views, permission_granted, grant_rate_pct, permission_denied, registrations, unlocks, out_of_range_attempts, ticket_clicks, unlock_to_click_rate_pct"
+      "page_views, permission_granted, grant_rate_pct, permission_denied, unlocks, out_of_range_attempts, ticket_clicks, unlock_to_click_rate_pct"
     )
     .eq("slug", campaign.slug)
     .maybeSingle()) as { data: FunnelRow | null; error: { message: string } | null };
 
+  const { data: emailRows } = await db
+    .from("claims")
+    .select("email_source, marketing_consent")
+    .eq("campaign_id", campaign.id)
+    .not("email", "is", null);
+  const emailsCaptured = emailRows?.length ?? 0;
+  const postUnlockEmails =
+    emailRows?.filter((r) => r.email_source === "post_unlock").length ?? 0;
+  const nearMissEmails =
+    emailRows?.filter((r) => r.email_source === "near_miss").length ?? 0;
+  const consentedContacts =
+    emailRows?.filter((r) => r.marketing_consent).length ?? 0;
+
   const { data: highIntent } = await db
     .from("claims")
-    .select("email, marketing_consent, consent_at, distance_m, created_at")
+    .select("email, marketing_consent, distance_m, email_captured_at")
     .eq("campaign_id", campaign.id)
-    .eq("unlocked", false)
-    .order("created_at", { ascending: false })
+    .eq("email_source", "near_miss")
+    .not("email", "is", null)
+    .order("email_captured_at", { ascending: false })
     .limit(500);
+
+  const hasTicketUrl = !!campaign.ticket_url;
 
   return (
     <div className="fade-up">
@@ -83,7 +98,7 @@ export default async function ResultsPage({
         </div>
       ) : (
         <div className="mt-8 grid grid-cols-2 border-b border-r border-ink/25 sm:grid-cols-4">
-          <Stat label="Unique page views" value={funnel?.page_views ?? 0} />
+          <Stat label="Unique visitors" value={funnel?.page_views ?? 0} />
           <Stat
             label="Permission granted"
             value={funnel?.permission_granted ?? 0}
@@ -93,17 +108,26 @@ export default async function ResultsPage({
             label="Permission denied"
             value={funnel?.permission_denied ?? 0}
           />
-          <Stat label="Registrations" value={funnel?.registrations ?? 0} />
           <Stat label="Unlocks" value={funnel?.unlocks ?? 0} />
           <Stat
             label="Out-of-range attempts"
             value={funnel?.out_of_range_attempts ?? 0}
           />
-          <Stat label="Ticket clicks" value={funnel?.ticket_clicks ?? 0} />
           <Stat
-            label="Unlock → ticket click"
-            value={pct(funnel?.unlock_to_click_rate_pct)}
+            label="Emails captured"
+            value={emailsCaptured}
+            sub={`${postUnlockEmails} post-unlock · ${nearMissEmails} near-miss`}
           />
+          <Stat label="Consented contacts" value={consentedContacts} />
+          {/* No ticket link on this campaign means no ticket CTA was ever
+              shown — a 0% here would misread as underperformance. */}
+          {hasTicketUrl && (
+            <Stat
+              label="Ticket clicks"
+              value={funnel?.ticket_clicks ?? 0}
+              sub={`${pct(funnel?.unlock_to_click_rate_pct)} of unlocks`}
+            />
+          )}
         </div>
       )}
 
@@ -125,14 +149,13 @@ export default async function ResultsPage({
         </div>
       </div>
       <p className="mt-1 text-sm text-ink/50">
-        Fans who registered but never unlocked — worth a follow-up if they
-        consented.
+        Fans who couldn&apos;t reach the spot but left an email on the
+        out-of-range screen — worth a follow-up if they consented.
       </p>
 
       {!highIntent?.length ? (
         <p className="mt-6 border-y border-ink/25 py-5 text-sm text-ink/50">
-          No one in this list{" "}
-          {funnel?.registrations ? "— everyone who registered unlocked. 🎉" : "yet."}
+          No one in this list yet.
         </p>
       ) : (
         <div className="mt-4 overflow-x-auto border-y border-ink/25">
@@ -142,7 +165,7 @@ export default async function ResultsPage({
                 <th className="px-4 py-3 font-medium">Email</th>
                 <th className="px-4 py-3 font-medium">Marketing consent</th>
                 <th className="px-4 py-3 font-medium">Closest distance</th>
-                <th className="px-4 py-3 font-medium">Registered</th>
+                <th className="px-4 py-3 font-medium">Left email</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-ink/15">
@@ -160,7 +183,11 @@ export default async function ResultsPage({
                     {r.distance_m != null ? `${r.distance_m} m` : "—"}
                   </td>
                   <td className="px-4 py-3 text-ink/60">
-                    {new Date(r.created_at).toLocaleDateString("en-GB")}
+                    {r.email_captured_at
+                      ? new Date(r.email_captured_at).toLocaleDateString(
+                          "en-GB"
+                        )
+                      : "—"}
                   </td>
                 </tr>
               ))}
