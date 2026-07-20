@@ -204,6 +204,9 @@ export default function OrganiserCampaignForm({
   const [savedId, setSavedId] = useState<string | undefined>(campaignId);
   const savedIdRef = useRef(savedId);
   savedIdRef.current = savedId;
+  // The slug as last persisted — the Preview link must open what's actually
+  // saved, not a half-edited slug that doesn't exist in the database yet.
+  const [savedSlug, setSavedSlug] = useState(initial?.slug ?? "");
   // What's actually in storage right now — updated after every successful
   // save so repeat saves neither re-upload nor re-delete.
   const savedRewardPathRef = useRef<string | null>(initialStoragePath ?? null);
@@ -217,9 +220,17 @@ export default function OrganiserCampaignForm({
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
   const persistInFlightRef = useRef(false);
   const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const persistRef = useRef<(opts: { navigate: boolean; silent: boolean }) => Promise<boolean>>(
+  const persistRef = useRef<(opts: { silent: boolean }) => Promise<boolean>>(
     async () => false
   );
+
+  // "Saved ✓" is a moment, not a mode — flash it on the button briefly,
+  // then return to the idle label.
+  useEffect(() => {
+    if (saveState !== "saved") return;
+    const t = setTimeout(() => setSaveState("idle"), 2500);
+    return () => clearTimeout(t);
+  }, [saveState]);
 
   // Every user edit flags unsaved changes; header/back/cancel navigation
   // then prompts before discarding them. Cleared on successful save. For
@@ -232,7 +243,7 @@ export default function OrganiserCampaignForm({
     if (!isDraftRef.current) return;
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     autosaveTimerRef.current = setTimeout(() => {
-      persistRef.current({ navigate: false, silent: true });
+      persistRef.current({ silent: true });
     }, 3000);
   };
   useEffect(
@@ -372,17 +383,12 @@ export default function OrganiserCampaignForm({
     setSlugStatus(taken ? "taken" : "available");
   }
 
-  // The single save pipeline behind everything: the primary submit
-  // (navigates back to the dashboard), the in-place Save button, and the
-  // debounced draft autosave (silent — skips quietly while the form is
-  // still incomplete rather than nagging mid-typing).
-  async function persist({
-    navigate,
-    silent,
-  }: {
-    navigate: boolean;
-    silent: boolean;
-  }): Promise<boolean> {
+  // The single save pipeline behind everything: the one Save button in the
+  // sticky footer, and the debounced draft autosave (silent — skips quietly
+  // while the form is still incomplete rather than nagging mid-typing).
+  // Persists the whole campaign in one pass: core fields, locations from
+  // the map builder, expiry customisation, reward file and background image.
+  async function persist({ silent }: { silent: boolean }): Promise<boolean> {
     if (persistInFlightRef.current) return false;
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
 
@@ -647,10 +653,7 @@ export default function OrganiserCampaignForm({
       guard?.setDirty(false);
       setSaveState("saved");
       setLastSavedAt(new Date());
-      if (navigate) {
-        router.push("/dashboard");
-        router.refresh();
-      }
+      setSavedSlug(values.slug.trim());
       return true;
     } finally {
       persistInFlightRef.current = false;
@@ -664,7 +667,7 @@ export default function OrganiserCampaignForm({
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
-    await persist({ navigate: true, silent: false });
+    await persist({ silent: false });
   }
 
   return (
@@ -961,50 +964,84 @@ export default function OrganiserCampaignForm({
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-3 pt-2">
-        <button
-          type="submit"
-          disabled={busy}
-          className="rounded-full bg-forest-deep px-7 py-3 font-semibold text-parchment transition active:scale-[0.98] disabled:opacity-50"
-        >
-          {busy ? busyLabel : savedId ? "Save & close" : "Create draft"}
-        </button>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => persist({ navigate: false, silent: false })}
-          className="rounded-full border border-ink/30 px-7 py-3 font-medium text-ink/80 transition hover:border-ink/60 disabled:opacity-50"
-        >
-          Save
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            // Cancel sits right next to Save — a stray click here is the
-            // most likely way to lose a half-built campaign.
-            if (guard && !guard.confirmIfDirty()) return;
-            router.push("/dashboard");
-          }}
-          className="rounded-full border border-ink/30 px-7 py-3 font-medium text-ink/80 transition hover:border-ink/60"
-        >
-          Cancel
-        </button>
-        <p className="text-xs text-ink/50" aria-live="polite">
-          {saveState === "saving"
-            ? "Saving…"
-            : saveState === "error"
-              ? "Couldn't save — check the form."
-              : lastSavedAt
-                ? `Draft saved ${lastSavedAt.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}`
-                : ""}
+      {/* The one save control, always reachable on a long form. Cancel and
+          Preview are not save paths — everything persists through persist()
+          above, so the button label and status here are the whole story. */}
+      <div className="sticky bottom-0 z-20 -mb-6 border-t border-ink/15 bg-cream/90 py-4 backdrop-blur-md">
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="submit"
+            disabled={busy}
+            className="rounded-full bg-forest-deep px-7 py-3 font-semibold text-parchment transition active:scale-[0.98] disabled:opacity-50"
+          >
+            {busy ? (
+              <span className="flex items-center gap-2.5">
+                <span
+                  aria-hidden
+                  className="h-4 w-4 animate-spin rounded-full border-2 border-parchment/40 border-t-parchment"
+                />
+                {busyLabel}
+              </span>
+            ) : saveState === "saved" ? (
+              "Saved ✓"
+            ) : isDraft ? (
+              "Save draft"
+            ) : (
+              "Save changes"
+            )}
+          </button>
+          <a
+            href={savedId && savedSlug ? `/c/${savedSlug}?preview=1` : undefined}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-disabled={!savedId || !savedSlug}
+            title={
+              savedId && savedSlug
+                ? "Opens the saved version of the fan page in a new tab"
+                : "Save the campaign first to preview it"
+            }
+            onClick={(e) => {
+              if (!savedId || !savedSlug) e.preventDefault();
+            }}
+            className={`rounded-full border px-7 py-3 font-medium transition ${
+              savedId && savedSlug
+                ? "border-ink/30 text-ink/80 hover:border-ink/60"
+                : "cursor-not-allowed border-ink/15 text-ink/30"
+            }`}
+          >
+            Preview
+          </a>
+          <button
+            type="button"
+            onClick={() => {
+              // Cancel sits right next to Save — a stray click here is the
+              // most likely way to lose a half-built campaign.
+              if (guard && !guard.confirmIfDirty()) return;
+              router.push("/dashboard");
+            }}
+            className="rounded-full border border-ink/30 px-7 py-3 font-medium text-ink/80 transition hover:border-ink/60"
+          >
+            Cancel
+          </button>
+        </div>
+        <p className="mt-2 min-h-4 text-xs" aria-live="polite">
+          {saveState === "error" ? (
+            <span className="font-medium text-clay">
+              {errors._form ?? "Couldn't save — check the highlighted fields."}
+            </span>
+          ) : (
+            <span className="text-ink/50">
+              {saveState === "saving"
+                ? "Saving…"
+                : lastSavedAt
+                  ? `${isDraft ? "Draft saved" : "Saved"} ${lastSavedAt.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}`
+                  : !savedId
+                    ? "New campaigns start as drafts and save automatically as you go — you publish them from the dashboard when you're ready."
+                    : ""}
+            </span>
+          )}
         </p>
       </div>
-      {!savedId && (
-        <p className="text-xs text-ink/50">
-          New campaigns start as drafts and save automatically as you go —
-          you publish them from the dashboard when you&apos;re ready.
-        </p>
-      )}
     </form>
   );
 }

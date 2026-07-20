@@ -93,6 +93,24 @@ type Step =
   | "location_error"
   | "rate_limited";
 
+// Owner-only preview. The payload is assembled server-side in page.tsx
+// after an ownership check — when present, this component renders entirely
+// from it: no fetches, no geolocation, no tracking, no claims.
+export type PreviewPayload = {
+  campaign: Campaign;
+  locations: SpotLocation[];
+  reward: Reward;
+};
+
+// The fan-visible states an owner can flick between in preview.
+const PREVIEW_STATES = [
+  { step: "landing", label: "Landing" },
+  { step: "locked", label: "Locked (near miss)" },
+  { step: "unlocked", label: "Unlocked" },
+  { step: "expired", label: "Expired" },
+] as const;
+type PreviewStep = (typeof PREVIEW_STATES)[number]["step"];
+
 const SESSION_KEY = "ta_session_id";
 const CLAIM_DEBOUNCE_MS = 15_000;
 // Once a fan submits or dismisses the email ask for a campaign, never
@@ -211,6 +229,7 @@ function EmailCaptureCard({
   artistName,
   onDone,
   onDismiss,
+  inert,
 }: {
   slug: string;
   sessionId: string;
@@ -219,14 +238,22 @@ function EmailCaptureCard({
   onDone: () => void;
   // Present only on the post-unlock variant — dismissible means dismissible.
   onDismiss?: () => void;
+  // Preview: render exactly as fans see it, but every interaction just
+  // shows a "disabled in preview" note — nothing is ever submitted.
+  inert?: boolean;
 }) {
   const [email, setEmail] = useState("");
   const [consent, setConsent] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [inertNote, setInertNote] = useState(false);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (inert) {
+      setInertNote(true);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -256,6 +283,7 @@ function EmailCaptureCard({
   return (
     <form
       onSubmit={submit}
+      noValidate={inert}
       className={
         source === "post_unlock"
           ? "rounded-2xl border border-ink/25 p-5"
@@ -318,10 +346,19 @@ function EmailCaptureCard({
         </span>
       </label>
       {error && <p className="mt-2 text-xs font-medium text-clay">{error}</p>}
+      {inertNote && (
+        <p className="mt-2 text-xs text-ink/50">Disabled in preview.</p>
+      )}
       {onDismiss && (
         <button
           type="button"
-          onClick={onDismiss}
+          onClick={() => {
+            if (inert) {
+              setInertNote(true);
+              return;
+            }
+            onDismiss();
+          }}
           className="mt-3 text-xs font-medium text-ink/50 underline-offset-4 hover:underline"
         >
           No thanks
@@ -439,8 +476,18 @@ function LocationsCard({
   );
 }
 
-export default function FanPage({ slug }: { slug: string }) {
+export default function FanPage({
+  slug,
+  preview,
+}: {
+  slug: string;
+  preview?: PreviewPayload | null;
+}) {
+  const isPreview = !!preview;
   const [step, setStep] = useState<Step>("loading");
+  // Which controls the owner has tapped in preview — each shows a small
+  // "disabled in preview" note instead of doing its real work.
+  const [previewBlocked, setPreviewBlocked] = useState<string | null>(null);
   const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [locations, setLocations] = useState<SpotLocation[]>([]);
   const [reward, setReward] = useState<Reward | null>(null);
@@ -501,6 +548,8 @@ export default function FanPage({ slug }: { slug: string }) {
     lng: number;
   } | null>(null);
   useEffect(() => {
+    // Preview must never touch geolocation, even this passive read.
+    if (isPreview) return;
     if (!("geolocation" in navigator) || !("permissions" in navigator)) return;
     let cancelled = false;
     navigator.permissions
@@ -525,7 +574,7 @@ export default function FanPage({ slug }: { slug: string }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [isPreview]);
   const [checking, setChecking] = useState(false);
   const [nearMiss, setNearMiss] = useState(false);
   const watchIdRef = useRef<number | null>(null);
@@ -536,6 +585,9 @@ export default function FanPage({ slug }: { slug: string }) {
 
   const track = useCallback(
     (event_type: string, metadata?: Record<string, unknown>) => {
+      // Guarded at the helper itself so no state transition can slip an
+      // analytics event through while the owner is previewing.
+      if (isPreview) return;
       fetch("/api/track", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -548,11 +600,24 @@ export default function FanPage({ slug }: { slug: string }) {
         keepalive: true,
       }).catch(() => {});
     },
-    [slug]
+    [slug, isPreview]
   );
+
+  // ── Preview bootstrap ───────────────────────────────────────────────
+  // Everything comes from the owner-authenticated server payload; the anon
+  // fetch below never runs, and no page_view is tracked.
+  useEffect(() => {
+    if (!preview) return;
+    sessionRef.current = "preview";
+    setCampaign(preview.campaign);
+    setLocations(preview.locations);
+    setReward(preview.reward);
+    setStep("landing");
+  }, [preview]);
 
   // ── Initial campaign load ───────────────────────────────────────────
   useEffect(() => {
+    if (isPreview) return;
     sessionRef.current = getSessionId();
     setInApp(isInAppBrowser());
     let cancelled = false;
@@ -599,7 +664,7 @@ export default function FanPage({ slug }: { slug: string }) {
     return () => {
       cancelled = true;
     };
-  }, [slug, track]);
+  }, [slug, track, isPreview]);
 
   // ── Stop/start the geolocation watcher ──────────────────────────────
   const stopWatching = useCallback(() => {
@@ -616,6 +681,9 @@ export default function FanPage({ slug }: { slug: string }) {
       accuracy: number,
       expectedInRange: boolean
     ) => {
+      // Preview can never claim — belt and braces on top of the guarded
+      // entry points, so no future code path can reach /api/claim either.
+      if (isPreview) return;
       const nowMs = Date.now();
       if (nowMs - lastClaimAttemptAtRef.current < CLAIM_DEBOUNCE_MS) return;
       lastClaimAttemptAtRef.current = nowMs;
@@ -663,7 +731,7 @@ export default function FanPage({ slug }: { slug: string }) {
         setChecking(false);
       }
     },
-    [slug, stopWatching]
+    [slug, stopWatching, isPreview]
   );
 
   const onPosition = useCallback(
@@ -717,19 +785,32 @@ export default function FanPage({ slug }: { slug: string }) {
   }, [onPosition, track, stopWatching]);
 
   const beginTracking = () => {
+    // In preview the unlock button stays visible but inert — geolocation
+    // must never be requested.
+    if (isPreview) {
+      setPreviewBlocked("unlock");
+      return;
+    }
     setStep("locating");
     startWatching();
   };
 
   const checkAgain = useCallback(() => {
+    if (isPreview) {
+      setPreviewBlocked("check");
+      return;
+    }
     if (!position) return;
     const nearest = nearestOf(position.lat, position.lng, locationsRef.current);
     const inRange = !!nearest && nearest.distanceM <= nearest.location.radius_m;
     attemptClaim(position.lat, position.lng, position.accuracy, inRange);
-  }, [position, attemptClaim]);
+  }, [position, attemptClaim, isPreview]);
 
   // ── Battery/lifecycle: item 7 ────────────────────────────────────────
   useEffect(() => {
+    // Preview forces `step` into "locked" without ever starting a watcher —
+    // this restart-on-return logic would start one for real. Skip entirely.
+    if (isPreview) return;
     const onVisibility = () => {
       if (document.hidden) {
         stopWatching();
@@ -742,12 +823,15 @@ export default function FanPage({ slug }: { slug: string }) {
     };
     document.addEventListener("visibilitychange", onVisibility);
     return () => document.removeEventListener("visibilitychange", onVisibility);
-  }, [step, stopWatching, startWatching]);
+  }, [step, stopWatching, startWatching, isPreview]);
 
   useEffect(() => stopWatching, [stopWatching]);
 
   // ── Clock-driven transitions: not-yet-started / landing / expired ──
   useEffect(() => {
+    // In preview the owner picks the state by hand — a draft whose dates
+    // are already past must not be yanked to "expired" by the clock.
+    if (isPreview) return;
     if (!campaign) return;
     if (now > endsAtMs) {
       if (!["unlocked", "expired", "not_found", "rate_limited"].includes(step)) {
@@ -761,7 +845,7 @@ export default function FanPage({ slug }: { slug: string }) {
       return;
     }
     if (step === "loading" || step === "not_yet_started") setStep("landing");
-  }, [now, campaign, endsAtMs, startsAtMs, step, stopWatching]);
+  }, [now, campaign, endsAtMs, startsAtMs, step, stopWatching, isPreview]);
 
   // Post-expiry traffic: fire once per page load whether the fan landed on
   // an already-ended campaign or it expired mid-session. The results page
@@ -808,12 +892,62 @@ export default function FanPage({ slug }: { slug: string }) {
   const canCheckAgain =
     !checking && Date.now() - lastClaimAttemptAtRef.current >= CLAIM_DEBOUNCE_MS;
 
+  // Preview state switcher. "Locked" plants a simulated position a
+  // plausible near-miss distance outside the first spot's radius, so the
+  // distance ring, closest-spot card and near-miss copy all render with
+  // realistic numbers against the campaign's real locations. Purely local
+  // state — none of the real entry points (watcher, claim, track) run.
+  const goToPreviewState = (target: PreviewStep) => {
+    if (!preview) return;
+    setPreviewBlocked(null);
+    setNearMiss(target === "locked");
+    if (target === "locked") {
+      const l0 = preview.locations[0];
+      if (l0) {
+        // Just outside the radius — a genuine "right at the edge" miss.
+        const missM = l0.radius_m + 15;
+        // ~111,320 m per degree of latitude.
+        setPosition({ lat: l0.lat + missM / 111320, lng: l0.lng, accuracy: 12 });
+      }
+    }
+    setStep(target);
+  };
+
   const bgUrl = campaign?.background_image_path
     ? `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/backgrounds/${campaign.background_image_path}`
     : null;
 
   return (
-    <div className="grain relative min-h-dvh bg-cream font-sans text-ink">
+    <div
+      className={`grain relative min-h-dvh bg-cream font-sans text-ink ${
+        isPreview ? "pt-24" : ""
+      }`}
+    >
+      {isPreview && (
+        <div className="fixed inset-x-0 top-0 z-50 bg-forest-deep text-parchment shadow-md">
+          <div className="mx-auto flex max-w-2xl flex-wrap items-center gap-x-4 gap-y-1.5 px-4 py-2.5">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-sage">
+              Preview — this is what fans will see
+            </p>
+            <div className="flex flex-wrap gap-1.5">
+              {PREVIEW_STATES.map((s) => (
+                <button
+                  key={s.step}
+                  type="button"
+                  onClick={() => goToPreviewState(s.step)}
+                  className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                    step === s.step
+                      ? "bg-parchment text-forest-deep"
+                      : "border border-parchment/40 text-parchment/90 hover:border-parchment"
+                  }`}
+                >
+                  {s.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
       {bgUrl && <FanBackground url={bgUrl} />}
       <div className={bgUrl ? "relative z-10 p-4 sm:p-6" : undefined}>
         <div
@@ -970,6 +1104,11 @@ export default function FanPage({ slug }: { slug: string }) {
               <button onClick={beginTracking} className={primaryBtn}>
                 I&apos;m here — unlock
               </button>
+              {previewBlocked === "unlock" && (
+                <p className="mt-2 text-center text-xs text-ink/50">
+                  Disabled in preview.
+                </p>
+              )}
             </div>
           </div>
         )}
@@ -1073,6 +1212,11 @@ export default function FanPage({ slug }: { slug: string }) {
             >
               {checking ? "Checking…" : "Check again"}
             </button>
+            {previewBlocked === "check" && (
+              <p className="text-center text-xs text-ink/50">
+                Disabled in preview.
+              </p>
+            )}
 
             {/* Clearly secondary, and always BELOW the distance counter,
                 countdown and locations — those stay the primary content. */}
@@ -1083,6 +1227,7 @@ export default function FanPage({ slug }: { slug: string }) {
                 source="near_miss"
                 artistName={campaign.artist_name}
                 onDone={() => rememberEmailPrompt("done", campaign.id)}
+                inert={isPreview}
               />
             ) : (
               <p className="text-center text-sm text-ink/50">
@@ -1163,6 +1308,7 @@ export default function FanPage({ slug }: { slug: string }) {
                 artistName={campaign.artist_name}
                 onDone={() => rememberEmailPrompt("done", campaign.id)}
                 onDismiss={() => rememberEmailPrompt("dismissed", campaign.id)}
+                inert={isPreview}
               />
             )}
             {emailPrompt === "done" && (
