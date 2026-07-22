@@ -16,6 +16,7 @@ import {
   MAX_LOCATIONS,
 } from "./location-types";
 import { useUnsavedChanges } from "@/app/unsaved-changes";
+import { revalidateDashboard } from "./actions";
 import {
   BG_ALLOWED_RE,
   BG_MAX_BYTES,
@@ -789,6 +790,10 @@ export default function OrganiserCampaignForm({
       setSaveState("saved");
       setLastSavedAt(new Date());
       setSavedSlug(values.slug.trim());
+      // Tell Next the campaign list is stale, so "Your campaigns" shows this
+      // save the moment the organiser goes back — no manual refresh. Fired
+      // and forgotten: a hiccup here must never fail an otherwise good save.
+      revalidateDashboard().catch(() => {});
       return true;
     } finally {
       persistInFlightRef.current = false;
