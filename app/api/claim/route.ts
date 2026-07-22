@@ -1,5 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase-admin";
+import {
+  buildJourneyState,
+  stopReward,
+  type JourneyState,
+  type StopReward,
+} from "@/lib/journey";
 
 // Identity is the client-generated session id — email is no longer asked
 // for before the location check (it's requested after unlock, via
@@ -18,10 +24,18 @@ type ClaimSuccess = {
   ticket_url?: string;
   location_name: string | null;
 };
+// Journey unlocks return the stop just collected plus the running collection
+// and progress; the finale rides along on the response that completes the set.
+type JourneyClaimSuccess = {
+  status: "unlocked" | "already_claimed";
+  mode: "journey";
+  just_unlocked: StopReward;
+} & JourneyState;
 type ClaimResponse =
   | { status: "expired" }
   | { status: "out_of_range"; distance_m: number; nearest_location_name: string }
   | ClaimSuccess
+  | JourneyClaimSuccess
   | { error: string };
 
 function haversineMeters(
@@ -97,7 +111,7 @@ export async function POST(
   const { data: campaign, error: campaignError } = await db
     .from("campaigns")
     .select(
-      "id, reward_content_url, reward_storage_path, discount_code, ticket_url, starts_at, ends_at, is_active, status"
+      "id, campaign_type, reward_teaser, reward_content_url, reward_storage_path, discount_code, ticket_url, starts_at, ends_at, is_active, status"
     )
     .eq("slug", slug)
     .maybeSingle();
@@ -117,9 +131,15 @@ export async function POST(
   }
 
   // A campaign can have many locations; a campaign with none can't unlock.
+  const isJourney = campaign.campaign_type === "journey";
+  // One static column set for both modes — single drops just ignore the
+  // reward columns (null for them). A conditional select string would defeat
+  // the client's column-type inference.
   const { data: locations, error: locationsError } = await db
     .from("campaign_locations")
-    .select("id, location_name, lat, lng, radius_m")
+    .select(
+      "id, location_name, lat, lng, radius_m, sort_order, reward_teaser, reward_content_url, reward_storage_path, discount_code, ticket_url"
+    )
     .eq("campaign_id", campaign.id);
   if (locationsError) {
     return NextResponse.json({ error: "server_error" }, { status: 500 });
@@ -219,6 +239,63 @@ export async function POST(
     });
   }
 
+  // ── Journey: collect THIS stop, return its own reward + progress ──────
+  if (isJourney) {
+    // One row per (stop, session). The unique constraint makes re-collecting
+    // the same stop a no-op — a 23505 means "already had this one".
+    const insertRes = await db
+      .from("location_unlocks")
+      .insert({
+        campaign_id: campaign.id,
+        location_id: nearest.id,
+        session_id: sessionId,
+        distance_m: distanceM,
+      })
+      .select("id")
+      .maybeSingle();
+    const alreadyHadStop = insertRes.error?.code === "23505";
+    if (insertRes.error && !alreadyHadStop) {
+      return NextResponse.json({ error: "server_error" }, { status: 500 });
+    }
+
+    // Keep the per-session claim flagged unlocked for reporting parity; the
+    // per-stop truth lives in location_unlocks. unlocked_at is set once.
+    await db
+      .from("claims")
+      .update({
+        unlocked: true,
+        distance_m: distanceM,
+        location_accuracy_m: accuracyM,
+        unlocked_location_id: nearest.id,
+        ...(claim.unlocked ? {} : { unlocked_at: now.toISOString() }),
+      })
+      .eq("id", claim.id);
+
+    if (!alreadyHadStop) {
+      await db.from("events").insert({
+        campaign_id: campaign.id,
+        claim_id: claim.id,
+        session_id: sessionId,
+        event_type: "unlock_success",
+        metadata: {
+          distance_m: distanceM,
+          location_id: nearest.id,
+          journey: true,
+        },
+      });
+    }
+
+    const state = await buildJourneyState(db, campaign, locations, sessionId);
+    const justUnlocked = await stopReward(db, nearest);
+    return NextResponse.json({
+      status: alreadyHadStop ? "already_claimed" : "unlocked",
+      mode: "journey",
+      just_unlocked: justUnlocked,
+      ...state,
+    });
+  }
+
+  // ── Single drop: the existing one-reward, unlock-anywhere flow ────────
   // An uploaded reward lives in the private storage bucket; hand out a
   // two-hour signed link instead of the raw path, which never leaves the
   // server.
