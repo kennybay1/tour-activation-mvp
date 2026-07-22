@@ -27,8 +27,10 @@ export default function StatusActions({
     });
 
   return (
-    <div className="text-right">
-      <div className="flex justify-end gap-2">
+    // Sits inline at the end of a campaign row's action links — flows left
+    // with them rather than pinning to the right edge of the panel.
+    <div>
+      <div className="flex gap-2">
         {status === "draft" && (
           <button
             onClick={() => run(publishCampaign)}
@@ -49,9 +51,7 @@ export default function StatusActions({
         )}
       </div>
       {message && (
-        <p className="mt-2 max-w-[16rem] text-xs font-medium text-clay">
-          {message}
-        </p>
+        <p className="mt-1 text-xs font-medium text-clay">{message}</p>
       )}
     </div>
   );
