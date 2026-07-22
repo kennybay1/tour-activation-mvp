@@ -21,7 +21,9 @@ export default async function EditCampaignPage({
     supabase.from("campaigns").select("*").eq("id", id).maybeSingle(),
     supabase
       .from("campaign_locations")
-      .select("id, location_name, lat, lng, radius_m, sort_order, source, external_ref")
+      .select(
+        "id, location_name, lat, lng, radius_m, sort_order, source, external_ref, reward_teaser, reward_content_url, reward_storage_path, discount_code, ticket_url"
+      )
       .eq("campaign_id", id)
       .order("sort_order"),
   ]);
@@ -38,6 +40,7 @@ export default async function EditCampaignPage({
     artist_name: c.artist_name ?? "",
     title: c.title ?? "",
     description: c.description ?? "",
+    campaign_type: c.campaign_type ?? "single",
     reward_teaser: c.reward_teaser ?? "",
     reward_content_url: c.reward_content_url ?? "",
     discount_code: c.discount_code ?? "",
@@ -63,6 +66,11 @@ export default async function EditCampaignPage({
     sort_order: l.sort_order,
     source: l.source,
     external_ref: l.external_ref ?? undefined,
+    reward_teaser: l.reward_teaser ?? "",
+    reward_content_url: l.reward_content_url ?? "",
+    discount_code: l.discount_code ?? "",
+    ticket_url: l.ticket_url ?? "",
+    reward_storage_path: l.reward_storage_path ?? null,
   }));
 
   return (

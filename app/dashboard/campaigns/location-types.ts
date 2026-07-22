@@ -14,6 +14,13 @@ export type BuilderLocation = {
   sort_order: number;
   source: string;
   external_ref?: string | null;
+  // Per-stop reward — used only by Journey campaigns. Optional on the type
+  // so single-drop builders, older data, and the admin form need no change.
+  reward_teaser?: string;
+  reward_content_url?: string;
+  discount_code?: string;
+  ticket_url?: string;
+  reward_storage_path?: string | null;
 };
 
 export const MAX_LOCATIONS = 100;

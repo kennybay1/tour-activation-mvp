@@ -7,6 +7,7 @@ import { supabase } from "@/lib/supabase";
 import {
   validateCampaignCore,
   suggestSlug,
+  isValidHttpUrl,
   MIN_RADIUS_M,
   type CampaignInput,
 } from "@/lib/campaign-schema";
@@ -38,6 +39,9 @@ export type OrganiserFormValues = {
   artist_name: string;
   title: string;
   description: string;
+  // "single" = one reward, unlock anywhere (default). "journey" = a reward
+  // at every stop, plus these campaign-level fields become the grand finale.
+  campaign_type: string;
   reward_teaser: string;
   reward_content_url: string;
   discount_code: string;
@@ -55,6 +59,7 @@ const EMPTY: OrganiserFormValues = {
   artist_name: "",
   title: "",
   description: "",
+  campaign_type: "single",
   reward_teaser: "",
   reward_content_url: "",
   discount_code: "",
@@ -94,8 +99,24 @@ function sanitizeFilename(name: string): string {
     .replace(/^-|-$/g, "");
 }
 
+// In a Journey, every stop must hand out something: an uploaded file (saved
+// or freshly picked), a hosted-content link, or a discount code.
+function stopHasReward(
+  loc: BuilderLocation,
+  hasPendingFile: boolean
+): boolean {
+  return (
+    hasPendingFile ||
+    !!loc.reward_storage_path ||
+    !!(loc.reward_content_url ?? "").trim() ||
+    !!(loc.discount_code ?? "").trim()
+  );
+}
+
 function validateLocations(
-  locations: BuilderLocation[]
+  locations: BuilderLocation[],
+  journey: boolean,
+  pendingFileIds: Set<string>
 ): { formError?: string; rowErrors: Record<string, string> } {
   const rowErrors: Record<string, string> = {};
   if (locations.length === 0) {
@@ -119,11 +140,31 @@ function validateLocations(
       rowErrors[loc.tempId] = "Longitude must be between -180 and 180.";
     } else if (!Number.isInteger(loc.radius_m) || loc.radius_m < MIN_RADIUS_M) {
       rowErrors[loc.tempId] = `Radius must be a whole number of at least ${MIN_RADIUS_M}m.`;
+    } else if (
+      loc.reward_content_url &&
+      loc.reward_content_url.trim() &&
+      !isValidHttpUrl(loc.reward_content_url.trim())
+    ) {
+      rowErrors[loc.tempId] = "Reward link must start with http:// or https://.";
+    } else if (
+      loc.ticket_url &&
+      loc.ticket_url.trim() &&
+      !isValidHttpUrl(loc.ticket_url.trim())
+    ) {
+      rowErrors[loc.tempId] = "Ticket link must start with http:// or https://.";
+    } else if (
+      journey &&
+      !stopHasReward(loc, pendingFileIds.has(loc.tempId))
+    ) {
+      rowErrors[loc.tempId] =
+        "Add a reward for this stop — a file, a link, or a discount code.";
     }
   }
   return {
     formError: Object.keys(rowErrors).length
-      ? "Fix the highlighted locations before saving."
+      ? journey
+        ? "Every stop needs its own reward — fix the highlighted stops."
+        : "Fix the highlighted locations before saving."
       : undefined,
     rowErrors,
   };
@@ -170,6 +211,12 @@ export default function OrganiserCampaignForm({
   );
   const [file, setFile] = useState<File | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
+
+  // Per-stop reward files, held here until save (like the campaign file),
+  // keyed by the location's tempId. Only used by Journey campaigns.
+  const [locationFiles, setLocationFiles] = useState<Record<string, File>>({});
+
+  const journey = values.campaign_type === "journey";
 
   // The id this form is writing to — starts as the prop, but a new
   // campaign gets one on its first (auto)save and keeps editing in place.
@@ -252,6 +299,40 @@ export default function OrganiserCampaignForm({
   const onLocationsChange = (next: BuilderLocation[]) => {
     markDirty();
     setLocations(next);
+    // Drop any pending file whose location was just removed, so we never
+    // try to upload against a stop that no longer exists.
+    setLocationFiles((m) => {
+      const alive = new Set(next.map((l) => l.tempId));
+      let changed = false;
+      const pruned: Record<string, File> = {};
+      for (const k of Object.keys(m)) {
+        if (alive.has(k)) pruned[k] = m[k];
+        else changed = true;
+      }
+      return changed ? pruned : m;
+    });
+  };
+
+  // A stop's reward file: chosen here, uploaded on save. Picking one clears
+  // any previously-saved path implicitly (the new upload replaces it).
+  const onPickLocationFile = (tempId: string, f: File) => {
+    markDirty();
+    setLocationFiles((m) => ({ ...m, [tempId]: f }));
+  };
+  const onClearLocationFile = (tempId: string) => {
+    markDirty();
+    setLocationFiles((m) => {
+      if (!(tempId in m)) return m;
+      const next = { ...m };
+      delete next[tempId];
+      return next;
+    });
+    // Also drop any already-saved file for this stop.
+    setLocations((prev) =>
+      prev.map((l) =>
+        l.tempId === tempId ? { ...l, reward_storage_path: null } : l
+      )
+    );
   };
 
   // Background image: mirrors the reward-file pattern — the processed blob
@@ -371,7 +452,11 @@ export default function OrganiserCampaignForm({
       is_active: true,
     };
     const clientErrors = validateCampaignCore(payload);
-    const { formError, rowErrors } = validateLocations(locations);
+    const { formError, rowErrors } = validateLocations(
+      locations,
+      journey,
+      new Set(Object.keys(locationFiles))
+    );
     if (formError) clientErrors._form = formError;
     if (Object.keys(clientErrors).length > 0) {
       if (!silent) {
@@ -404,6 +489,7 @@ export default function OrganiserCampaignForm({
         artist_name: values.artist_name.trim(),
         title: values.title.trim(),
         description: values.description.trim() || null,
+        campaign_type: journey ? "journey" : "single",
         reward_teaser: values.reward_teaser.trim() || null,
         reward_content_url: values.reward_content_url.trim() || null,
         discount_code: values.discount_code.trim() || null,
@@ -465,12 +551,16 @@ export default function OrganiserCampaignForm({
       // delete removed ones. RLS scopes every statement to this owner.
       const { data: existingLocs } = await supabase
         .from("campaign_locations")
-        .select("id")
+        .select("id, reward_storage_path")
         .eq("campaign_id", id);
+      const oldPathById = new Map(
+        (existingLocs ?? []).map((l) => [l.id, l.reward_storage_path])
+      );
       const keepIds = new Set(locations.map((l) => l.id).filter(Boolean));
-      const toDelete = (existingLocs ?? [])
-        .map((l) => l.id)
-        .filter((locId) => !keepIds.has(locId));
+      const toDeleteRows = (existingLocs ?? []).filter(
+        (l) => !keepIds.has(l.id)
+      );
+      const toDelete = toDeleteRows.map((l) => l.id);
       if (toDelete.length) {
         const { error: delError } = await supabase
           .from("campaign_locations")
@@ -486,9 +576,18 @@ export default function OrganiserCampaignForm({
           setSaveState("error");
           return false;
         }
+        // Best-effort: clear the reward files of removed stops.
+        const orphaned = toDeleteRows
+          .map((l) => l.reward_storage_path)
+          .filter((p): p is string => !!p);
+        if (orphaned.length) {
+          await supabase.storage.from("rewards").remove(orphaned);
+        }
       }
       // Newly inserted rows report their ids back into state, so the next
-      // save updates them in place instead of delete-and-reinserting.
+      // save updates them in place instead of delete-and-reinserting. The
+      // per-stop reward fields (journey mode) ride along here; single-drop
+      // campaigns simply leave them null.
       const insertedIds: Record<string, string> = {};
       for (let i = 0; i < locations.length; i++) {
         const l = locations[i];
@@ -500,6 +599,10 @@ export default function OrganiserCampaignForm({
           sort_order: i,
           source: l.source,
           external_ref: l.external_ref ?? null,
+          reward_teaser: (l.reward_teaser ?? "").trim() || null,
+          reward_content_url: (l.reward_content_url ?? "").trim() || null,
+          discount_code: (l.discount_code ?? "").trim() || null,
+          ticket_url: (l.ticket_url ?? "").trim() || null,
         };
         if (l.id) {
           const res = await supabase
@@ -525,13 +628,73 @@ export default function OrganiserCampaignForm({
           insertedIds[l.tempId] = res.data.id;
         }
       }
-      if (Object.keys(insertedIds).length) {
+
+      // Per-stop reward files. Each pending file uploads to its stop's own
+      // folder; a stop whose saved file was removed gets its column cleared.
+      // Runs after the loop above so freshly inserted stops have ids.
+      const newLocPaths: Record<string, string | null> = {};
+      for (const l of locations) {
+        const locId = l.id ?? insertedIds[l.tempId];
+        if (!locId) continue;
+        const pending = locationFiles[l.tempId];
+        const oldPath = oldPathById.get(locId);
+        if (pending) {
+          if (!silent) setBusyLabel("Uploading stop rewards…");
+          const path = `${user.id}/${id}/${locId}/${sanitizeFilename(pending.name)}`;
+          const up = await supabase.storage
+            .from("rewards")
+            .upload(path, pending, { upsert: true, contentType: pending.type });
+          if (up.error) {
+            if (!silent) {
+              setErrors({
+                _form:
+                  "A stop's reward file failed to upload — try saving again.",
+              });
+            }
+            setSaveState("error");
+            return false;
+          }
+          const res = await supabase
+            .from("campaign_locations")
+            .update({ reward_storage_path: path })
+            .eq("id", locId);
+          if (res.error) {
+            setSaveState("error");
+            return false;
+          }
+          if (oldPath && oldPath !== path) {
+            await supabase.storage.from("rewards").remove([oldPath]);
+          }
+          newLocPaths[l.tempId] = path;
+        } else if (oldPath && !l.reward_storage_path) {
+          // Saved file was removed with no replacement.
+          const res = await supabase
+            .from("campaign_locations")
+            .update({ reward_storage_path: null })
+            .eq("id", locId);
+          if (res.error) {
+            setSaveState("error");
+            return false;
+          }
+          await supabase.storage.from("rewards").remove([oldPath]);
+          newLocPaths[l.tempId] = null;
+        }
+      }
+
+      if (Object.keys(insertedIds).length || Object.keys(newLocPaths).length) {
         setLocations((prev) =>
-          prev.map((l) =>
-            insertedIds[l.tempId] ? { ...l, id: insertedIds[l.tempId] } : l
-          )
+          prev.map((l) => {
+            const next = { ...l };
+            if (insertedIds[l.tempId]) next.id = insertedIds[l.tempId];
+            if (l.tempId in newLocPaths)
+              next.reward_storage_path = newLocPaths[l.tempId];
+            return next;
+          })
         );
       }
+      // Pending files are now in storage — forget them so a repeat save
+      // doesn't re-upload.
+      if (Object.keys(locationFiles).length) setLocationFiles({});
 
       // Reward file changes. undefined = leave the stored path untouched.
       let newPath: string | null | undefined = undefined;
@@ -649,6 +812,59 @@ export default function OrganiserCampaignForm({
           {errors._form}
         </p>
       )}
+
+      <div className="rounded-2xl border border-ink/25 p-5">
+        <p className="text-xs font-medium uppercase tracking-[0.15em] text-ink/60">
+          Campaign type
+        </p>
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          {[
+            {
+              key: "single",
+              label: "Single drop",
+              blurb: "One reward. Fans unlock it at any location.",
+            },
+            {
+              key: "journey",
+              label: "Journey",
+              blurb: "A reward at every stop, plus an optional grand finale.",
+            },
+          ].map((opt) => {
+            const active = values.campaign_type === opt.key;
+            return (
+              <button
+                key={opt.key}
+                type="button"
+                onClick={() => set("campaign_type", opt.key)}
+                aria-pressed={active}
+                className={`rounded-xl border p-4 text-left transition ${
+                  active
+                    ? "border-forest bg-forest/10"
+                    : "border-ink/25 hover:border-ink/50"
+                }`}
+              >
+                <span
+                  className={`block text-sm font-semibold ${
+                    active ? "text-forest-deep" : "text-ink"
+                  }`}
+                >
+                  {opt.label}
+                </span>
+                <span className="mt-1 block text-xs text-ink/60">
+                  {opt.blurb}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        {journey && (
+          <p className="mt-3 text-xs text-ink/50">
+            In a Journey, each stop below gets its own reward, and fans must be
+            physically at a stop to collect it. The campaign reward further
+            down becomes the grand finale for collecting them all.
+          </p>
+        )}
+      </div>
 
       <Field label="Artist name" error={errors.artist_name}>
         <input
@@ -769,20 +985,43 @@ export default function OrganiserCampaignForm({
 
       <div>
         <p className="mb-2 block text-xs font-medium uppercase tracking-[0.15em] text-ink/60">
-          Locations
+          {journey ? "Stops" : "Locations"}
         </p>
         <p className="mb-3 text-xs text-ink/50">
-          Fans can unlock at any of these — the nearest one counts. Drag
-          markers to fine-tune, or add more spots on the map.
+          {journey
+            ? "Each stop carries its own reward — expand a stop below to set it. Fans must be physically at a stop to collect it."
+            : "Fans can unlock at any of these — the nearest one counts. Drag markers to fine-tune, or add more spots on the map."}
         </p>
         <LocationBuilder
           locations={locations}
           onChange={onLocationsChange}
           rowErrors={locErrors}
+          journey={journey}
+          locationFileNames={Object.fromEntries(
+            Object.entries(locationFiles).map(([k, v]) => [k, v.name])
+          )}
+          onPickLocationFile={onPickLocationFile}
+          onClearLocationFile={onClearLocationFile}
         />
       </div>
 
-      <Field label="Reward teaser" error={errors.reward_teaser}>
+      {journey && (
+        <div className="rounded-2xl border border-forest/30 bg-forest/5 p-4">
+          <p className="text-xs font-medium uppercase tracking-[0.15em] text-forest-deep">
+            Grand finale (optional)
+          </p>
+          <p className="mt-1 text-xs text-ink/60">
+            Unlocked once a fan has collected every stop. This is the
+            campaign&apos;s own reward, below — leave it all blank to skip the
+            finale.
+          </p>
+        </div>
+      )}
+
+      <Field
+        label={journey ? "Finale teaser" : "Reward teaser"}
+        error={errors.reward_teaser}
+      >
         <input
           className={inputCls}
           value={values.reward_teaser}
@@ -792,7 +1031,7 @@ export default function OrganiserCampaignForm({
       </Field>
 
       <Field
-        label="Reward file"
+        label={journey ? "Finale file" : "Reward file"}
         error={fileError ?? undefined}
         hint="Audio (MP3, M4A), video (MP4) or image (JPG, PNG, WebP), up to 50MB. Stored privately — fans only ever get a temporary link, after unlocking."
       >
