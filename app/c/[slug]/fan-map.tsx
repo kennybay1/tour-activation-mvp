@@ -26,6 +26,15 @@ function markerIcon(): L.DivIcon {
   });
 }
 
+function youIcon(): L.DivIcon {
+  return L.divIcon({
+    className: "",
+    html: `<div class="fan-map-you"></div>`,
+    iconSize: [18, 18],
+    iconAnchor: [9, 9],
+  });
+}
+
 function MapReady({ onReady }: { onReady: (m: L.Map) => void }) {
   const map = useMap();
   useEffect(() => {
@@ -35,11 +44,17 @@ function MapReady({ onReady }: { onReady: (m: L.Map) => void }) {
   return null;
 }
 
-function FitToMarkers({ locations }: { locations: FanMapLocation[] }) {
+function FitToMarkers({
+  locations,
+  fanPosition,
+}: {
+  locations: FanMapLocation[];
+  fanPosition: { lat: number; lng: number } | null;
+}) {
   const map = useMap();
   const didFit = useRef(false);
   useEffect(() => {
-    if (didFit.current || !locations.length) return;
+    if (didFit.current || !locations.length || fanPosition) return;
     didFit.current = true;
     if (locations.length === 1) {
       map.setView([locations[0].lat, locations[0].lng], 15);
@@ -49,7 +64,22 @@ function FitToMarkers({ locations }: { locations: FanMapLocation[] }) {
         { padding: [32, 32], maxZoom: 15 }
       );
     }
-  }, [locations, map]);
+  }, [locations, map, fanPosition]);
+
+  // Whenever a fan position lands (or is refreshed), widen the view so the
+  // fan can see themselves AND the spots — that gap is the whole point.
+  useEffect(() => {
+    if (!fanPosition || !locations.length) return;
+    didFit.current = true;
+    map.fitBounds(
+      L.latLngBounds([
+        ...locations.map((l) => [l.lat, l.lng] as [number, number]),
+        [fanPosition.lat, fanPosition.lng] as [number, number],
+      ]),
+      { padding: [40, 40], maxZoom: 15 }
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fanPosition?.lat, fanPosition?.lng, map]);
   return null;
 }
 
@@ -57,6 +87,7 @@ export default function FanMap({
   locations,
   focusedId,
   focusNonce,
+  fanPosition = null,
 }: {
   locations: FanMapLocation[];
   // Tapping a location in the list sets these; a nonce (not just the id)
@@ -64,6 +95,9 @@ export default function FanMap({
   // an id-only effect dependency would bail out on a same-value update.
   focusedId: string | null;
   focusNonce: number;
+  // The fan's own position, shown as a distinct pulsing dot. Client-side
+  // only — it arrives from the browser's geolocation and goes nowhere else.
+  fanPosition?: { lat: number; lng: number } | null;
 }) {
   const mapRef = useRef<L.Map | null>(null);
   const markerRefs = useRef<Record<string, L.Marker | null>>({});
@@ -94,7 +128,17 @@ export default function FanMap({
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
         />
         <MapReady onReady={(m) => (mapRef.current = m)} />
-        <FitToMarkers locations={locations} />
+        <FitToMarkers locations={locations} fanPosition={fanPosition} />
+        {fanPosition && (
+          <Marker
+            position={[fanPosition.lat, fanPosition.lng]}
+            icon={youIcon()}
+          >
+            <Popup>
+              <p className="text-center font-medium text-ink">You are here</p>
+            </Popup>
+          </Marker>
+        )}
         {locations.map((l) => (
           <Marker
             key={l.id}

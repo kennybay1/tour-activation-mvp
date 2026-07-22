@@ -138,6 +138,36 @@ body {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
 }
 
+/* The fan's own live position — forest, with a soft pulse, so it can't be
+   confused with the clay spot pins. */
+.fan-map-you {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  border-radius: 9999px;
+  background: var(--forest);
+  border: 2px solid var(--cream);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+}
+.fan-map-you::after {
+  content: "";
+  position: absolute;
+  inset: -7px;
+  border-radius: 9999px;
+  border: 2px solid var(--forest);
+  animation: you-pulse 2s ease-out infinite;
+}
+@keyframes you-pulse {
+  0% {
+    transform: scale(0.55);
+    opacity: 0.7;
+  }
+  100% {
+    transform: scale(1.35);
+    opacity: 0;
+  }
+}
+
 /* Leaflet control chrome, restyled to match the app rather than the
    library's default blue-and-white look. */
 .leaflet-container {

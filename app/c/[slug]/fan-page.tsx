@@ -385,15 +385,30 @@ function RewardTeaserCard({ teaser }: { teaser: string }) {
   );
 }
 
+// The fan-initiated "how close am I?" control: one browser location read,
+// used only in the page (distance maths + the map dot) — never sent
+// anywhere, so the "we never store your coordinates" promise holds.
+type LocateControl = {
+  run: () => void;
+  busy: boolean;
+  error: string | null;
+  // Preview tapped it — show the standard "disabled" note instead.
+  blocked: boolean;
+};
+
 function LocationsCard({
   locations,
   nearest,
+  fanPosition,
+  locate,
   focusedLocationId,
   focusNonce,
   onFocusLocation,
 }: {
   locations: SpotLocation[];
   nearest: { location: SpotLocation; distanceM: number } | null;
+  fanPosition: { lat: number; lng: number } | null;
+  locate: LocateControl | null;
   focusedLocationId: string | null;
   focusNonce: number;
   onFocusLocation: (id: string) => void;
@@ -467,12 +482,40 @@ function LocationsCard({
         </div>
       )}
 
+      {locate && (
+        <div className="mt-3">
+          <button
+            type="button"
+            onClick={locate.run}
+            disabled={locate.busy}
+            className="w-full rounded-full border border-forest/50 py-2.5 text-sm font-medium text-forest transition active:scale-[0.98] disabled:opacity-50"
+          >
+            {locate.busy
+              ? "Finding you…"
+              : nearest
+                ? "Update my distance"
+                : "How close am I?"}
+          </button>
+          {locate.error && (
+            <p className="mt-1.5 text-xs font-medium text-clay">
+              {locate.error}
+            </p>
+          )}
+          {locate.blocked && (
+            <p className="mt-1.5 text-center text-xs text-ink/50">
+              Disabled in preview.
+            </p>
+          )}
+        </div>
+      )}
+
       <div className="mt-4">
         <MapErrorBoundary fallback={fullListFallback}>
           <FanMap
             locations={locations}
             focusedId={focusedLocationId}
             focusNonce={focusNonce}
+            fanPosition={fanPosition}
           />
         </MapErrorBoundary>
       </div>
@@ -886,6 +929,49 @@ export default function FanPage({
     </div>
   );
 
+  // Fan-initiated one-shot location read for the "How close am I?" button.
+  // Feeds the same passive display position — distance line, closest-spot
+  // pick and the map's "you are here" dot — and nothing else. Coordinates
+  // stay in the browser; no server call is involved.
+  const [locateBusy, setLocateBusy] = useState(false);
+  const [locateError, setLocateError] = useState<string | null>(null);
+  const locateMe = useCallback(() => {
+    if (isPreview) {
+      setPreviewBlocked("locate");
+      return;
+    }
+    if (!("geolocation" in navigator)) {
+      setLocateError("This browser doesn't support location.");
+      return;
+    }
+    setLocateBusy(true);
+    setLocateError(null);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setPassivePosition({
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+        });
+        setLocateBusy(false);
+      },
+      (err) => {
+        setLocateBusy(false);
+        setLocateError(
+          err.code === err.PERMISSION_DENIED
+            ? "Location is blocked for this site — allow it in your browser settings, then try again."
+            : "Couldn't get a fix — try again, or step outside."
+        );
+      },
+      { enableHighAccuracy: true, timeout: 15_000, maximumAge: 0 }
+    );
+  }, [isPreview]);
+  const locate: LocateControl = {
+    run: locateMe,
+    busy: locateBusy,
+    error: locateError,
+    blocked: previewBlocked === "locate",
+  };
+
   // Live position wins; the passive one covers screens before tracking
   // starts (landing, not-yet-started) for fans who granted location before.
   const displayPosition = position ?? passivePosition;
@@ -1061,6 +1147,8 @@ export default function FanPage({
             <LocationsCard
               locations={locations}
               nearest={nearest}
+              fanPosition={displayPosition}
+              locate={locate}
               focusedLocationId={focusedLocationId}
               focusNonce={focusNonce}
               onFocusLocation={focusLocation}
@@ -1109,6 +1197,8 @@ export default function FanPage({
             <LocationsCard
               locations={locations}
               nearest={nearest}
+              fanPosition={displayPosition}
+              locate={locate}
               focusedLocationId={focusedLocationId}
               focusNonce={focusNonce}
               onFocusLocation={focusLocation}
@@ -1232,6 +1322,10 @@ export default function FanPage({
             <LocationsCard
               locations={locations}
               nearest={nearest}
+              fanPosition={displayPosition}
+              // Live tracking is already running here and "Check again" is
+              // the primary action — a second locate button would compete.
+              locate={null}
               focusedLocationId={focusedLocationId}
               focusNonce={focusNonce}
               onFocusLocation={focusLocation}
@@ -1395,6 +1489,8 @@ export default function FanPage({
             <LocationsCard
               locations={locations}
               nearest={nearest}
+              fanPosition={displayPosition}
+              locate={locate}
               focusedLocationId={focusedLocationId}
               focusNonce={focusNonce}
               onFocusLocation={focusLocation}
@@ -1422,6 +1518,8 @@ export default function FanPage({
             <LocationsCard
               locations={locations}
               nearest={nearest}
+              fanPosition={displayPosition}
+              locate={locate}
               focusedLocationId={focusedLocationId}
               focusNonce={focusNonce}
               onFocusLocation={focusLocation}
