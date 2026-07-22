@@ -23,7 +23,7 @@ export default async function DashboardHome() {
     supabase
       .from("campaigns")
       .select(
-        "id, slug, title, artist_name, description, status, starts_at, ends_at"
+        "id, slug, title, artist_name, description, status, starts_at, ends_at, background_image_path"
       )
       .order("created_at", { ascending: false }),
     supabase.from("campaign_locations").select("campaign_id"),
@@ -56,15 +56,17 @@ export default async function DashboardHome() {
         </div>
       )}
       <div className="fade-up">
+        {/* Only slightly wider than the fan page's max-w-md column, so the
+            backdrop stays the dominant thing on screen. */}
         <div
-          className={
+          className={`mx-auto w-full max-w-lg ${
             backdropUrl
               ? "relative z-10 rounded-3xl bg-cream/90 p-5 shadow-xl backdrop-blur-md sm:p-6"
-              : undefined
-          }
+              : ""
+          }`}
         >
           <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
-            <h1 className="font-serif text-3xl">Your campaigns</h1>
+            <h1 className="font-serif text-2xl">Your campaigns</h1>
             <div className="flex flex-wrap items-center gap-2">
               <ProfileBackdrop hasImage={!!backdropUrl} />
               <Link
@@ -87,13 +89,23 @@ export default async function DashboardHome() {
             </p>
           ) : (
             <ul className="mt-4 divide-y divide-ink/15 border-y border-ink/25">
-              {campaigns.map((c) => (
-                <CampaignRow
-                  key={c.id}
-                  c={c as CampaignListItem}
-                  locationCount={locationCounts.get(c.id) ?? 0}
-                />
-              ))}
+              {campaigns.map((c) => {
+                // The campaign's own artwork wins; the organiser's dashboard
+                // backdrop stands in when none was uploaded.
+                const thumbPath = c.background_image_path ?? backdropPath;
+                return (
+                  <CampaignRow
+                    key={c.id}
+                    c={c as CampaignListItem}
+                    locationCount={locationCounts.get(c.id) ?? 0}
+                    thumbnailUrl={
+                      thumbPath
+                        ? `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/backgrounds/${thumbPath}`
+                        : null
+                    }
+                  />
+                );
+              })}
             </ul>
           )}
         </div>

@@ -33,9 +33,13 @@ export type CampaignListItem = {
 export default function CampaignRow({
   c,
   locationCount,
+  thumbnailUrl,
 }: {
   c: CampaignListItem;
   locationCount: number;
+  // The campaign's own artwork, or the organiser's dashboard backdrop as a
+  // stand-in when none was uploaded — resolved by the page, not here.
+  thumbnailUrl: string | null;
 }) {
   const locationSummary =
     locationCount === 0
@@ -45,7 +49,33 @@ export default function CampaignRow({
         : `${locationCount} locations`;
 
   return (
-    <li className="py-4">
+    <li className="flex items-start gap-3.5 py-4">
+      {thumbnailUrl ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={thumbnailUrl}
+          alt=""
+          className="mt-0.5 h-16 w-16 shrink-0 rounded-xl object-cover"
+        />
+      ) : (
+        <div className="mt-0.5 flex h-16 w-16 shrink-0 items-center justify-center rounded-xl bg-ink/5 text-ink/30">
+          <svg
+            aria-hidden
+            className="h-5 w-5"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <circle cx="9" cy="9" r="2" />
+            <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+          </svg>
+        </div>
+      )}
+      <div className="min-w-0 flex-1">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <p className="font-medium">{c.title}</p>
         <span
@@ -85,6 +115,7 @@ export default function CampaignRow({
           Edit
         </Link>
         <StatusActions id={c.id} status={c.status} />
+      </div>
       </div>
     </li>
   );
