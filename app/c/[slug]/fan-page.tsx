@@ -84,6 +84,9 @@ type Step =
   | "loading"
   | "not_found"
   | "not_yet_started"
+  // The poster-like first screen: artwork full-bleed, one centred panel
+  // with the campaign's name and countdown. Tapping it opens "landing".
+  | "cover"
   | "landing"
   | "locating"
   | "locked"
@@ -104,6 +107,7 @@ export type PreviewPayload = {
 
 // The fan-visible states an owner can flick between in preview.
 const PREVIEW_STATES = [
+  { step: "cover", label: "Cover" },
   { step: "landing", label: "Landing" },
   { step: "locked", label: "Locked (near miss)" },
   { step: "unlocked", label: "Unlocked" },
@@ -612,7 +616,7 @@ export default function FanPage({
     setCampaign(preview.campaign);
     setLocations(preview.locations);
     setReward(preview.reward);
-    setStep("landing");
+    setStep("cover");
   }, [preview]);
 
   // ── Initial campaign load ───────────────────────────────────────────
@@ -841,10 +845,14 @@ export default function FanPage({
       return;
     }
     if (now < startsAtMs) {
-      if (step === "loading" || step === "landing") setStep("not_yet_started");
+      if (step === "loading" || step === "cover" || step === "landing") {
+        setStep("not_yet_started");
+      }
       return;
     }
-    if (step === "loading" || step === "not_yet_started") setStep("landing");
+    // A freshly opened (or newly started) campaign begins at the cover;
+    // the fan taps through to the landing screen themselves.
+    if (step === "loading" || step === "not_yet_started") setStep("cover");
   }, [now, campaign, endsAtMs, startsAtMs, step, stopWatching, isPreview]);
 
   // Post-expiry traffic: fire once per page load whether the fan landed on
@@ -950,10 +958,19 @@ export default function FanPage({
       )}
       {bgUrl && <FanBackground url={bgUrl} />}
       <div className={bgUrl ? "relative z-10 p-4 sm:p-6" : undefined}>
+        {/* On the cover step the artwork IS the page — the usual full-height
+            cream panel drops away and only the small centred card floats
+            over it (the card itself renders in the cover step below). */}
         <div
-          className={`mx-auto flex w-full max-w-md flex-col ${
+          className={`mx-auto flex w-full flex-col ${
+            step === "cover" ? "max-w-2xl" : "max-w-md"
+          } ${
             bgUrl
-              ? "min-h-[calc(100dvh-2rem)] rounded-3xl bg-cream/90 px-5 py-8 shadow-xl backdrop-blur-md sm:min-h-[calc(100dvh-3rem)]"
+              ? `min-h-[calc(100dvh-2rem)] px-5 py-8 sm:min-h-[calc(100dvh-3rem)] ${
+                  step === "cover"
+                    ? ""
+                    : "rounded-3xl bg-cream/90 shadow-xl backdrop-blur-md"
+                }`
               : "min-h-dvh px-5 py-8"
           }`}
         >
@@ -1050,6 +1067,23 @@ export default function FanPage({
             />
 
             {inAppBanner}
+          </div>
+        )}
+
+        {step === "cover" && campaign && (
+          <div className="fade-up flex flex-1 items-center justify-center">
+            <button
+              type="button"
+              onClick={() => setStep("landing")}
+              aria-label={`Open ${campaign.title}`}
+              className="w-full rounded-[2rem] bg-cream/90 px-8 py-12 text-center shadow-xl backdrop-blur-md transition active:scale-[0.99]"
+            >
+              <p className={eyebrow}>{campaign.artist_name}</p>
+              <h1 className="mt-3 font-serif text-4xl sm:text-5xl">
+                {campaign.title}
+              </h1>
+              <CountdownLine label="Ends in" msRemaining={endsAtMs - now} />
+            </button>
           </div>
         )}
 
