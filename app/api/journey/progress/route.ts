@@ -9,9 +9,10 @@ import { buildJourneyState, type JourneyState } from "@/lib/journey";
 // and only ever for stops this session genuinely unlocked via /api/claim.
 
 type ProgressResponse =
-  | { status: "expired" }
+  | { status: "not_found" }
   | { mode: "single" }
-  | ({ mode: "journey" } & JourneyState)
+  | { mode: "journey"; live: false }
+  | ({ mode: "journey"; live: true } & JourneyState)
   | { error: string };
 
 export async function POST(
@@ -50,22 +51,26 @@ export async function POST(
   if (campaignError) {
     return NextResponse.json({ error: "server_error" }, { status: 500 });
   }
-
-  const now = new Date();
-  if (
-    !campaign ||
-    campaign.status !== "live" ||
-    !campaign.is_active ||
-    now < new Date(campaign.starts_at) ||
-    now > new Date(campaign.ends_at)
-  ) {
-    // Matches /api/claim — rewards aren't served outside the live window.
-    return NextResponse.json({ status: "expired" });
+  if (!campaign) {
+    return NextResponse.json({ status: "not_found" });
   }
 
-  // Single drops have no journey state; the caller falls back to its own flow.
+  // The mode is always reported so the fan page knows which experience to
+  // render — even before the drop opens. Single drops have no journey state.
   if (campaign.campaign_type !== "journey") {
     return NextResponse.json({ mode: "single" });
+  }
+
+  // Collected rewards are only assembled inside the live window — matching
+  // /api/claim, which never serves rewards before start or after end.
+  const now = new Date();
+  const live =
+    campaign.status === "live" &&
+    campaign.is_active &&
+    now >= new Date(campaign.starts_at) &&
+    now <= new Date(campaign.ends_at);
+  if (!live) {
+    return NextResponse.json({ mode: "journey", live: false });
   }
 
   const { data: locations, error: locationsError } = await db
@@ -84,5 +89,5 @@ export async function POST(
     locations ?? [],
     session_id
   );
-  return NextResponse.json({ mode: "journey", ...state });
+  return NextResponse.json({ mode: "journey", live: true, ...state });
 }

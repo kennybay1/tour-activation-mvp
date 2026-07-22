@@ -80,6 +80,30 @@ type Reward = {
   location_name: string | null;
 };
 
+// Journey rewards, mirroring the shapes from /api/claim and
+// /api/journey/progress (server-assembled — the raw fields never reach the
+// browser except through those owner-gated / geofenced routes).
+type StopReward = {
+  location_id: string;
+  location_name: string;
+  reward_teaser: string | null;
+  reward_content_url: string | null;
+  discount_code: string | null;
+  ticket_url?: string;
+};
+type FinaleReward = {
+  reward_teaser: string | null;
+  reward_content_url: string | null;
+  discount_code: string | null;
+  ticket_url?: string;
+};
+type JourneyState = {
+  progress: { collected: number; total: number };
+  complete: boolean;
+  collected: StopReward[];
+  finale: FinaleReward | null;
+};
+
 type Step =
   | "loading"
   | "not_found"
@@ -385,6 +409,294 @@ function RewardTeaserCard({ teaser }: { teaser: string }) {
   );
 }
 
+// The unlocked media itself — audio, video, or image. Shared by the single
+// unlocked screen and every journey reward card.
+function RewardMedia({ url }: { url: string }) {
+  const kind = mediaKind(url);
+  return (
+    <div className="rounded-2xl bg-forest-deep p-4">
+      {kind === "audio" && <audio controls src={url} className="w-full" />}
+      {kind === "video" && (
+        <video controls playsInline src={url} className="w-full rounded-xl" />
+      )}
+      {kind === "image" && (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={url} alt="Your unlocked reward" className="w-full rounded-xl" />
+      )}
+    </div>
+  );
+}
+
+// A copyable discount code with its own copy state, so several can appear at
+// once (one per collected stop) without sharing a single "Copied ✓".
+function DiscountCodeBlock({
+  code,
+  label = "Your discount code",
+}: {
+  code: string;
+  label?: string;
+}) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {}
+  };
+  return (
+    <div className="rounded-2xl bg-forest p-5 text-center text-parchment">
+      <div className="rounded-xl border border-parchment/25 p-5">
+        <p className="text-xs font-medium uppercase tracking-[0.3em] text-sage">
+          {label}
+        </p>
+        <p className="mt-3 font-mono text-2xl font-medium tracking-[0.15em]">
+          {code}
+        </p>
+        <button
+          onClick={copy}
+          className="mt-4 rounded-full border border-parchment/40 px-5 py-2 text-sm font-medium text-parchment transition active:scale-[0.98]"
+        >
+          {copied ? "Copied ✓" : "Copy code"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// One collected stop (or the finale), rendered as a self-contained reward
+// card: name, optional teaser, media, discount, ticket.
+function JourneyRewardCard({
+  title,
+  teaser,
+  contentUrl,
+  discountCode,
+  ticketUrl,
+  onTicket,
+  highlight,
+}: {
+  title: string;
+  teaser: string | null;
+  contentUrl: string | null;
+  discountCode: string | null;
+  ticketUrl?: string;
+  onTicket?: () => void;
+  highlight?: boolean;
+}) {
+  return (
+    <div
+      className={`rounded-2xl border p-4 ${
+        highlight ? "border-forest bg-forest/10" : "border-ink/20"
+      }`}
+    >
+      <p className="text-sm font-semibold text-ink">{title}</p>
+      {teaser && <p className="mt-1 text-sm text-ink/60">{teaser}</p>}
+      {contentUrl && (
+        <div className="mt-3">
+          <RewardMedia url={contentUrl} />
+        </div>
+      )}
+      {discountCode && (
+        <div className="mt-3">
+          <DiscountCodeBlock code={discountCode} />
+        </div>
+      )}
+      {ticketUrl && onTicket && (
+        <button
+          onClick={onTicket}
+          className="mt-3 w-full rounded-full bg-clay py-3 text-sm font-bold text-cream transition active:scale-[0.98]"
+        >
+          Get tickets
+        </button>
+      )}
+    </div>
+  );
+}
+
+// The collect-them-all hub — one evolving screen for a Journey. Shows the
+// running progress, the growing collection of stop rewards, a prompt to find
+// the next stop, and the grand finale once every stop is in. The map card
+// and in-app banner are passed in as children so the hub owns only the
+// journey-specific chrome.
+function JourneyHub({
+  campaign,
+  journey,
+  justUnlocked,
+  totalStops,
+  nearMiss,
+  roundedDistance,
+  nearestName,
+  msRemaining,
+  onUnlock,
+  busy,
+  previewBlocked,
+  onTicket,
+  children,
+}: {
+  campaign: Campaign;
+  journey: JourneyState | null;
+  justUnlocked: StopReward | null;
+  totalStops: number;
+  nearMiss: boolean;
+  roundedDistance: number | null;
+  nearestName: string | null;
+  msRemaining: number;
+  onUnlock: () => void;
+  busy: boolean;
+  previewBlocked: boolean;
+  onTicket: () => void;
+  children: React.ReactNode;
+}) {
+  const collected = journey?.collected ?? [];
+  const collectedCount = journey?.progress.collected ?? collected.length;
+  const total = journey?.progress.total ?? totalStops;
+  const complete = journey?.complete ?? false;
+  const finale = journey?.finale ?? null;
+  const pct = total > 0 ? Math.round((collectedCount / total) * 100) : 0;
+  const remaining = Math.max(total - collectedCount, 0);
+  const openTicket = (url?: string) => {
+    if (!url) return;
+    onTicket();
+    window.open(url, "_blank", "noopener");
+  };
+
+  return (
+    <div className="fade-up flex flex-1 flex-col gap-6">
+      <div className="mt-2">
+        <p className={eyebrow}>{campaign.artist_name}</p>
+        <h1 className="mt-4 font-serif text-[2.6rem] leading-[1.06]">
+          {campaign.title}
+        </h1>
+        <CountdownLine label="Ends in" msRemaining={msRemaining} />
+        {collectedCount === 0 && campaign.description && (
+          <p className="mt-4 text-lg leading-relaxed text-ink/70">
+            {campaign.description}
+          </p>
+        )}
+      </div>
+
+      {/* Progress */}
+      <div className="rounded-2xl border border-ink/25 p-5">
+        <div className="flex items-center justify-between">
+          <p className="text-xs font-medium uppercase tracking-[0.3em] text-ink/50">
+            Your journey
+          </p>
+          <p className="font-mono text-sm text-forest-deep">
+            {collectedCount} / {total}
+          </p>
+        </div>
+        <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-ink/10">
+          <div
+            className="h-full rounded-full bg-forest transition-all"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+        <p className="mt-2 text-sm text-ink/60">
+          {complete
+            ? "Every stop collected."
+            : collectedCount === 0
+              ? `Collect a reward at each of the ${total} stops.`
+              : `${remaining} ${remaining === 1 ? "stop" : "stops"} to go.`}
+        </p>
+      </div>
+
+      {/* Your collection so far */}
+      {collected.length > 0 && (
+        <div className="space-y-3">
+          <p className="text-xs font-medium uppercase tracking-[0.3em] text-ink/50">
+            Your collection
+          </p>
+          {collected.map((s) => (
+            <JourneyRewardCard
+              key={s.location_id}
+              title={s.location_name}
+              teaser={s.reward_teaser}
+              contentUrl={s.reward_content_url}
+              discountCode={s.discount_code}
+              ticketUrl={s.ticket_url}
+              onTicket={() => openTicket(s.ticket_url)}
+              highlight={justUnlocked?.location_id === s.location_id}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* Grand finale, once every stop is collected */}
+      {complete && (
+        <div className="space-y-3">
+          <div className="text-center">
+            <h2 className="font-serif text-3xl">You collected them all</h2>
+          </div>
+          {finale ? (
+            <>
+              <p className="text-center text-xs font-medium uppercase tracking-[0.3em] text-clay">
+                The grand finale
+              </p>
+              <JourneyRewardCard
+                title={finale.reward_teaser ?? "Grand finale"}
+                teaser={
+                  finale.reward_teaser
+                    ? null
+                    : "Your reward for finishing the journey."
+                }
+                contentUrl={finale.reward_content_url}
+                discountCode={finale.discount_code}
+                ticketUrl={finale.ticket_url}
+                onTicket={() => openTicket(finale.ticket_url)}
+                highlight
+              />
+            </>
+          ) : (
+            <p className="text-center text-ink/60">
+              Nice work — you visited every stop.
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Find the next stop */}
+      {!complete && (
+        <>
+          {nearMiss ? (
+            <div className="text-center">
+              <h2 className="font-serif text-2xl">So close!</h2>
+              <p className="mt-2 text-ink/60">
+                You&apos;re right at the edge — move a few metres and we&apos;ll
+                pick it up.
+              </p>
+            </div>
+          ) : roundedDistance != null && nearestName ? (
+            <p className="text-center text-sm text-ink/60">
+              About {roundedDistance}m to {nearestName}.
+            </p>
+          ) : null}
+
+          {children}
+
+          <div className="pt-2">
+            <button onClick={onUnlock} disabled={busy} className={primaryBtn}>
+              {busy
+                ? "Checking…"
+                : collectedCount === 0
+                  ? "I'm here — unlock"
+                  : "I'm at the next stop — unlock"}
+            </button>
+            {previewBlocked && (
+              <p className="mt-2 text-center text-xs text-ink/50">
+                Disabled in preview.
+              </p>
+            )}
+            <p className="mt-3 text-center text-xs text-ink/50">
+              We&apos;ll ask for your location — only to check you&apos;re at a
+              stop, and we never store your coordinates.
+            </p>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // The fan-initiated "how close am I?" control: one browser location read,
 // used only in the page (distance maths + the map dot) — never sent
 // anywhere, so the "we never store your coordinates" promise holds.
@@ -542,6 +854,16 @@ export default function FanPage({
   const [inApp, setInApp] = useState(false);
   const sessionRef = useRef<string>("");
   const viewTracked = useRef(false);
+
+  // Journey state. isJourney flips the fan experience to the collect-them-all
+  // hub; `journey` holds what's been collected so far (restored on load, and
+  // updated after every stop unlock); justUnlocked highlights the stop just
+  // collected. Refs mirror them for the stable claim callback.
+  const [isJourney, setIsJourney] = useState(false);
+  const [journey, setJourney] = useState<JourneyState | null>(null);
+  const [justUnlocked, setJustUnlocked] = useState<StopReward | null>(null);
+  const isJourneyRef = useRef(isJourney);
+  isJourneyRef.current = isJourney;
 
   // Email is asked for AFTER the location check, never before. "done" =
   // submitted (either variant), "dismissed" = declined the post-unlock
@@ -707,6 +1029,31 @@ export default function FanPage({
           viewTracked.current = true;
           track("page_view");
         }
+
+        // Ask the server which experience this is, and (inside the live
+        // window) what this device has already collected. This is the only
+        // way the client learns the mode — campaign_type is never exposed on
+        // the public view, and rewards are never in it either.
+        try {
+          const res = await fetch("/api/journey/progress", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ slug, session_id: sessionRef.current }),
+          });
+          const pj = await res.json();
+          if (cancelled) return;
+          if (pj.mode === "journey") {
+            setIsJourney(true);
+            if (pj.live) {
+              setJourney({
+                progress: pj.progress,
+                complete: pj.complete,
+                collected: pj.collected,
+                finale: pj.finale,
+              });
+            }
+          }
+        } catch {}
       });
     return () => {
       cancelled = true;
@@ -753,7 +1100,24 @@ export default function FanPage({
           return;
         }
         const json = await res.json();
-        if (json.status === "unlocked" || json.status === "already_claimed") {
+        if (json.mode === "journey") {
+          // A stop was collected. Fold in the new state, highlight it, and
+          // return to the journey hub (never the terminal single screen) so
+          // the fan can go on to the next stop — or see the finale.
+          stopWatching();
+          setNearMiss(false);
+          setJourney({
+            progress: json.progress,
+            complete: json.complete,
+            collected: json.collected,
+            finale: json.finale,
+          });
+          setJustUnlocked(json.just_unlocked);
+          setStep("landing");
+        } else if (
+          json.status === "unlocked" ||
+          json.status === "already_claimed"
+        ) {
           stopWatching();
           setNearMiss(false);
           setReward(json);
@@ -764,7 +1128,11 @@ export default function FanPage({
           // differ. A plain "still far away" reading from the unconditional
           // first-fix or manual check is not a near miss.
           setNearMiss(expectedInRange);
-          setStep((s) => (s === "locating" ? "locked" : s));
+          // Journeys keep the fan on the hub; single drops use the locked
+          // near-miss screen.
+          setStep((s) =>
+            s === "locating" ? (isJourneyRef.current ? "landing" : "locked") : s
+          );
         } else if (json.status === "expired") {
           stopWatching();
           setStep("expired");
@@ -787,7 +1155,9 @@ export default function FanPage({
       const lng = pos.coords.longitude;
       const accuracy = pos.coords.accuracy;
       setPosition({ lat, lng, accuracy });
-      setStep((s) => (s === "locating" ? "locked" : s));
+      setStep((s) =>
+        s === "locating" ? (isJourneyRef.current ? "landing" : "locked") : s
+      );
 
       const nearest = nearestOf(lat, lng, locationsRef.current);
       const inRange = !!nearest && nearest.distanceM <= nearest.location.radius_m;
@@ -1175,7 +1545,37 @@ export default function FanPage({
           </div>
         )}
 
-        {step === "landing" && campaign && (
+        {step === "landing" && campaign && isJourney && (
+          <JourneyHub
+            campaign={campaign}
+            journey={journey}
+            justUnlocked={justUnlocked}
+            totalStops={locations.length}
+            nearMiss={nearMiss}
+            roundedDistance={roundedDistance}
+            nearestName={nearest?.location.location_name ?? null}
+            msRemaining={endsAtMs - now}
+            onUnlock={beginTracking}
+            busy={checking}
+            previewBlocked={previewBlocked === "unlock"}
+            onTicket={() => {
+              track("ticket_click");
+            }}
+          >
+            <LocationsCard
+              locations={locations}
+              nearest={nearest}
+              fanPosition={displayPosition}
+              locate={locate}
+              focusedLocationId={focusedLocationId}
+              focusNonce={focusNonce}
+              onFocusLocation={focusLocation}
+            />
+            {inAppBanner}
+          </JourneyHub>
+        )}
+
+        {step === "landing" && campaign && !isJourney && (
           <div className="fade-up flex flex-1 flex-col gap-6">
             <div className="mt-2">
               <p className={eyebrow}>{campaign.artist_name}</p>
