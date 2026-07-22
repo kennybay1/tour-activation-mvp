@@ -8,6 +8,7 @@ import {
 } from "@/lib/campaign-schema";
 import { type BuilderLocation } from "./location-types";
 import { getPreset } from "@/lib/preset-registry";
+import RewardAssets from "./reward-assets";
 
 // Rendering all rows plainly is fine up to the ~100-location cap this app
 // enforces elsewhere — collapsed rows are cheap. This page-size just keeps
@@ -65,10 +66,6 @@ const rowInputCls =
 const fullInputCls =
   "w-full rounded-lg border border-ink/20 bg-transparent px-3 py-1.5 text-sm text-ink placeholder-ink/30 outline-none focus:border-forest";
 
-// Same rules the campaign-level reward file uses.
-const STOP_FILE_RE = /\.(mp3|m4a|mp4|jpg|jpeg|png|webp)$/i;
-const STOP_FILE_MAX_BYTES = 50 * 1024 * 1024;
-
 type RowProps = {
   location: BuilderLocation;
   index: number;
@@ -76,15 +73,12 @@ type RowProps = {
   error?: string;
   overlapping: boolean;
   journey: boolean;
-  pendingFileName?: string;
   registerRef: (tempId: string, el: HTMLDivElement | null) => void;
   onToggleExpand: (tempId: string) => void;
   onFocusRow: (tempId: string) => void;
   onHover: (tempId: string | null) => void;
   onUpdate: (tempId: string, patch: Partial<BuilderLocation>) => void;
   onRemove: (tempId: string) => void;
-  onPickFile?: (tempId: string, file: File) => void;
-  onClearFile?: (tempId: string) => void;
 };
 
 const LocationRow = memo(function LocationRow({
@@ -94,38 +88,17 @@ const LocationRow = memo(function LocationRow({
   error,
   overlapping,
   journey,
-  pendingFileName,
   registerRef,
   onToggleExpand,
   onFocusRow,
   onHover,
   onUpdate,
   onRemove,
-  onPickFile,
-  onClearFile,
 }: RowProps) {
   const code = `LOC-${String(index + 1).padStart(3, "0")}`;
   const headerId = `loc-header-${location.tempId}`;
   const panelId = `loc-panel-${location.tempId}`;
   const radiusMsg = radiusMessage(location.radius_m);
-  const [fileErr, setFileErr] = useState<string | null>(null);
-
-  const savedFileName = location.reward_storage_path?.split("/").pop();
-  const onFilePick = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0];
-    e.target.value = "";
-    if (!f) return;
-    setFileErr(null);
-    if (!STOP_FILE_RE.test(f.name)) {
-      setFileErr("Use MP3, M4A, MP4, JPG, PNG or WebP.");
-      return;
-    }
-    if (f.size > STOP_FILE_MAX_BYTES) {
-      setFileErr("That file is over 50MB.");
-      return;
-    }
-    onPickFile?.(location.tempId, f);
-  };
 
   return (
     <div
@@ -256,60 +229,14 @@ const LocationRow = memo(function LocationRow({
                 className={fullInputCls}
               />
 
-              {pendingFileName || savedFileName ? (
-                <div className="flex items-center justify-between gap-3 rounded-lg border border-ink/20 px-3 py-2">
-                  <span className="min-w-0 truncate font-mono text-xs text-ink/70">
-                    {pendingFileName
-                      ? `${pendingFileName} — uploads when you save`
-                      : savedFileName}
-                  </span>
-                  <div className="flex shrink-0 gap-2">
-                    <label className="cursor-pointer rounded-full border border-ink/30 px-3 py-1 text-xs font-medium text-ink/70 transition hover:border-ink/60">
-                      Replace
-                      <input
-                        type="file"
-                        accept=".mp3,.m4a,.mp4,.jpg,.jpeg,.png,.webp"
-                        className="hidden"
-                        onChange={onFilePick}
-                      />
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setFileErr(null);
-                        onClearFile?.(location.tempId);
-                      }}
-                      className="rounded-full border border-ink/30 px-3 py-1 text-xs font-medium text-ink/70 transition hover:border-ink/60"
-                    >
-                      Remove
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <label className="flex cursor-pointer items-center justify-center rounded-lg border border-dashed border-ink/35 px-3 py-3 text-xs font-medium text-ink/60 transition hover:border-ink/60">
-                  Upload a reward file
-                  <input
-                    type="file"
-                    accept=".mp3,.m4a,.mp4,.jpg,.jpeg,.png,.webp"
-                    className="hidden"
-                    onChange={onFilePick}
-                  />
-                </label>
-              )}
-              {fileErr && (
-                <p className="text-xs font-medium text-clay">{fileErr}</p>
-              )}
-
-              <input
-                value={location.reward_content_url ?? ""}
-                onChange={(e) =>
-                  onUpdate(location.tempId, {
-                    reward_content_url: e.target.value,
-                  })
+              <RewardAssets
+                assets={location.assets ?? []}
+                onChange={(next) =>
+                  onUpdate(location.tempId, { assets: next })
                 }
-                placeholder="Or link to hosted content (https://…)"
-                className={fullInputCls}
+                compact
               />
+
               <input
                 value={location.discount_code ?? ""}
                 onChange={(e) =>
@@ -417,9 +344,6 @@ export default function LocationAccordion({
   rowErrors,
   overlapping,
   journey = false,
-  locationFileNames = {},
-  onPickLocationFile,
-  onClearLocationFile,
   onToggleExpand,
   onFocusRow,
   onHover,
@@ -437,9 +361,6 @@ export default function LocationAccordion({
   rowErrors: Record<string, string>;
   overlapping: Set<string>;
   journey?: boolean;
-  locationFileNames?: Record<string, string>;
-  onPickLocationFile?: (tempId: string, file: File) => void;
-  onClearLocationFile?: (tempId: string) => void;
   onToggleExpand: (tempId: string) => void;
   onFocusRow: (tempId: string) => void;
   onHover: (tempId: string | null) => void;
@@ -537,15 +458,12 @@ export default function LocationAccordion({
             error={rowErrors[l.tempId]}
             overlapping={overlapping.has(l.tempId)}
             journey={journey}
-            pendingFileName={locationFileNames[l.tempId]}
             registerRef={registerRef}
             onToggleExpand={onToggleExpand}
             onFocusRow={onFocusRow}
             onHover={onHover}
             onUpdate={onUpdate}
             onRemove={onRemove}
-            onPickFile={onPickLocationFile}
-            onClearFile={onClearLocationFile}
           />
         ))}
       </div>

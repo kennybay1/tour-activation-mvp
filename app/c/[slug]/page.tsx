@@ -2,6 +2,7 @@ import FanPage, { type PreviewPayload } from "./fan-page";
 import { getAdminUser, getSessionUser } from "@/lib/supabase-server";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 import { stopReward, finaleReward } from "@/lib/journey";
+import { rewardItems } from "@/lib/rewards";
 
 // Owner-only preview. With ?preview=1 the status gate is bypassed ONLY when
 // the requester has an authenticated session AND owns the campaign (or is
@@ -31,15 +32,9 @@ async function loadPreview(slug: string): Promise<PreviewPayload | null> {
     .eq("campaign_id", c.id)
     .order("sort_order");
 
-  // Same signed-URL treatment the real unlock uses — the raw storage path
-  // never leaves the server.
-  let rewardContentUrl: string | null = c.reward_content_url;
-  if (c.reward_storage_path) {
-    const { data: signed } = await db.storage
-      .from("rewards")
-      .createSignedUrl(c.reward_storage_path, 60 * 60 * 2);
-    if (signed?.signedUrl) rewardContentUrl = signed.signedUrl;
-  }
+  // Same treatment the real unlock uses — every file/link on the reward,
+  // with uploads signed and raw storage paths kept server-side.
+  const campaignItems = await rewardItems(db, { campaignId: c.id }, c);
 
   // Journey preview content: every stop's reward and the finale, assembled
   // the same server-only way as a real unlock (owner is the viewer here).
@@ -77,7 +72,8 @@ async function loadPreview(slug: string): Promise<PreviewPayload | null> {
       radius_m: l.radius_m,
     })),
     reward: {
-      reward_content_url: rewardContentUrl,
+      items: campaignItems,
+      reward_content_url: campaignItems[0]?.url ?? null,
       discount_code: c.discount_code,
       ...(c.ticket_url ? { ticket_url: c.ticket_url } : {}),
       location_name: locs?.[0]?.location_name ?? null,

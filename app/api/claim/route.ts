@@ -6,6 +6,7 @@ import {
   type JourneyState,
   type StopReward,
 } from "@/lib/journey";
+import { rewardItems, type RewardItem } from "@/lib/rewards";
 
 // Identity is the client-generated session id — email is no longer asked
 // for before the location check (it's requested after unlock, via
@@ -19,6 +20,7 @@ const MAX_ACCURACY_GRACE_M = 50;
 
 type ClaimSuccess = {
   status: "unlocked" | "already_claimed";
+  items: RewardItem[];
   reward_content_url: string | null;
   discount_code: string | null;
   ticket_url?: string;
@@ -296,21 +298,16 @@ export async function POST(
   }
 
   // ── Single drop: the existing one-reward, unlock-anywhere flow ────────
-  // An uploaded reward lives in the private storage bucket; hand out a
-  // two-hour signed link instead of the raw path, which never leaves the
-  // server.
-  let rewardContentUrl: string | null = campaign.reward_content_url;
-  if (campaign.reward_storage_path) {
-    const { data: signed } = await db.storage
-      .from("rewards")
-      .createSignedUrl(campaign.reward_storage_path, 60 * 60 * 2);
-    if (signed?.signedUrl) rewardContentUrl = signed.signedUrl;
-  }
+  // The reward can hold several files and/or links; uploaded files come back
+  // as short-lived signed links, and the raw storage paths never leave the
+  // server. reward_content_url stays as the first item for compatibility.
+  const items = await rewardItems(db, { campaignId: campaign.id }, campaign);
 
   // ticket_url is optional — omitted from the payload entirely when the
   // campaign has none, so the client never renders an empty CTA.
   const successBase = {
-    reward_content_url: rewardContentUrl,
+    items,
+    reward_content_url: items[0]?.url ?? null,
     discount_code: campaign.discount_code,
     ...(campaign.ticket_url ? { ticket_url: campaign.ticket_url } : {}),
   };

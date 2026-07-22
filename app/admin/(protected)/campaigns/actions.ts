@@ -30,6 +30,29 @@ function toRow(input: CampaignInput) {
   };
 }
 
+// Rewards are read from reward_assets now, so the single link this form
+// edits has to be mirrored there — otherwise a change here would be quietly
+// ignored in favour of a stale item. Only the campaign's own link item is
+// touched; uploaded files (added in the organiser dashboard) are left alone.
+async function syncAdminLinkAsset(campaignId: string, input: CampaignInput) {
+  const db = supabaseAdmin();
+  const url = input.reward_content_url.trim();
+  await db
+    .from("reward_assets")
+    .delete()
+    .eq("campaign_id", campaignId)
+    .eq("kind", "link");
+  if (!url) return;
+  await db.from("reward_assets").insert({
+    campaign_id: campaignId,
+    kind: "link",
+    storage_path: null,
+    url,
+    label: null,
+    sort_order: 99,
+  });
+}
+
 // The admin form edits a single (primary) location; other locations a
 // campaign may have are left untouched.
 async function syncPrimaryLocation(campaignId: string, input: CampaignInput) {
@@ -107,6 +130,7 @@ export async function saveCampaign(
     if (locError) {
       return { ok: false, errors: { _form: "Couldn't save the location. Try again." } };
     }
+    await syncAdminLinkAsset(id, input);
     revalidatePath("/admin");
     revalidatePath(`/c/${row.slug}`);
     return { ok: true, id };
@@ -124,6 +148,7 @@ export async function saveCampaign(
   if (locError) {
     return { ok: false, errors: { _form: "Campaign created, but its location failed to save — edit it to retry." } };
   }
+  await syncAdminLinkAsset(data.id, input);
   revalidatePath("/admin");
   revalidatePath(`/c/${row.slug}`);
   return { ok: true, id: data.id };

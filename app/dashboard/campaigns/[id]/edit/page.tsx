@@ -22,7 +22,7 @@ export default async function EditCampaignPage({
     supabase
       .from("campaign_locations")
       .select(
-        "id, location_name, lat, lng, radius_m, sort_order, source, external_ref, reward_teaser, reward_content_url, reward_storage_path, discount_code, ticket_url"
+        "id, location_name, lat, lng, radius_m, sort_order, source, external_ref, reward_teaser, discount_code, ticket_url"
       )
       .eq("campaign_id", id)
       .order("sort_order"),
@@ -34,6 +34,50 @@ export default async function EditCampaignPage({
     );
   }
   if (!c) notFound();
+
+  // Reward items: the campaign's own, plus every stop's. Fetched by explicit
+  // ids so one campaign can never pull in another's.
+  const ASSET_COLS = "id, location_id, kind, storage_path, url, label, sort_order";
+  const locIds = (locs ?? []).map((l) => l.id);
+  const [{ data: campaignAssetRows }, { data: locAssetRows }] =
+    await Promise.all([
+      supabase
+        .from("reward_assets")
+        .select(ASSET_COLS)
+        .eq("campaign_id", id)
+        .order("sort_order"),
+      locIds.length
+        ? supabase
+            .from("reward_assets")
+            .select(ASSET_COLS)
+            .in("location_id", locIds)
+            .order("sort_order")
+        : Promise.resolve({ data: [] as never[] }),
+    ]);
+
+  const toAsset = (a: {
+    id: string;
+    kind: string;
+    storage_path: string | null;
+    url: string | null;
+    label: string | null;
+  }) => ({
+    id: a.id,
+    tempId: a.id,
+    kind: a.kind === "link" ? ("link" as const) : ("file" as const),
+    storage_path: a.storage_path,
+    url: a.url ?? undefined,
+    label: a.label ?? undefined,
+  });
+
+  const initialAssets = (campaignAssetRows ?? []).map(toAsset);
+  const assetsByLocation = new Map<string, ReturnType<typeof toAsset>[]>();
+  for (const a of locAssetRows ?? []) {
+    if (!a.location_id) continue;
+    const list = assetsByLocation.get(a.location_id) ?? [];
+    list.push(toAsset(a));
+    assetsByLocation.set(a.location_id, list);
+  }
 
   const initial: OrganiserFormValues = {
     slug: c.slug ?? "",
@@ -67,10 +111,9 @@ export default async function EditCampaignPage({
     source: l.source,
     external_ref: l.external_ref ?? undefined,
     reward_teaser: l.reward_teaser ?? "",
-    reward_content_url: l.reward_content_url ?? "",
     discount_code: l.discount_code ?? "",
     ticket_url: l.ticket_url ?? "",
-    reward_storage_path: l.reward_storage_path ?? null,
+    assets: assetsByLocation.get(l.id) ?? [],
   }));
 
   return (
@@ -83,9 +126,9 @@ export default async function EditCampaignPage({
         initial={initial}
         startsIso={c.starts_at}
         endsIso={c.ends_at}
-        storagePath={c.reward_storage_path}
         backgroundPath={c.background_image_path}
         initialLocations={initialLocations}
+        initialAssets={initialAssets}
         status={c.status}
       />
     </div>

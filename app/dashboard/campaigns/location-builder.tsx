@@ -263,19 +263,12 @@ export default function LocationBuilder({
   onChange,
   rowErrors,
   journey = false,
-  locationFileNames = {},
-  onPickLocationFile,
-  onClearLocationFile,
 }: {
   locations: BuilderLocation[];
   onChange: (next: BuilderLocation[]) => void;
   rowErrors: Record<string, string>;
-  // Journey mode: each row shows its own reward fields. The file handlers
-  // and pending-file names are drilled straight through to the accordion.
+  // Journey mode: each row shows its own reward fields.
   journey?: boolean;
-  locationFileNames?: Record<string, string>;
-  onPickLocationFile?: (tempId: string, file: File) => void;
-  onClearLocationFile?: (tempId: string) => void;
 }) {
   const mapRef = useRef<L.Map | null>(null);
   const didInitialFit = useRef(false);
@@ -991,9 +984,6 @@ export default function LocationBuilder({
         rowErrors={rowErrors}
         overlapping={overlapping}
         journey={journey}
-        locationFileNames={locationFileNames}
-        onPickLocationFile={onPickLocationFile}
-        onClearLocationFile={onClearLocationFile}
         onToggleExpand={toggleSelect}
         onFocusRow={focusRow}
         onHover={setHovered}

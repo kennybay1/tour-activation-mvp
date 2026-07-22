@@ -71,7 +71,16 @@ type SpotLocation = {
   radius_m: number;
 };
 
+// One file or link on a reward. A reward can hold several, in the order the
+// organiser arranged them.
+type RewardItem = {
+  kind: "file" | "link";
+  url: string;
+  label: string | null;
+};
+
 type Reward = {
+  items: RewardItem[];
   reward_content_url: string | null;
   discount_code: string | null;
   // Omitted by the server when the campaign has no ticket link — the
@@ -87,12 +96,14 @@ type StopReward = {
   location_id: string;
   location_name: string;
   reward_teaser: string | null;
+  items: RewardItem[];
   reward_content_url: string | null;
   discount_code: string | null;
   ticket_url?: string;
 };
 type FinaleReward = {
   reward_teaser: string | null;
+  items: RewardItem[];
   reward_content_url: string | null;
   discount_code: string | null;
   ticket_url?: string;
@@ -184,6 +195,16 @@ function mediaKind(url: string): "audio" | "video" | "image" {
   if (/\.(mp3|m4a|wav|ogg|aac|flac)$/.test(path)) return "audio";
   if (/\.(mp4|webm|mov|m4v)$/.test(path)) return "video";
   return "image";
+}
+
+// Only embed things we can actually play or show. A pasted link to, say, a
+// Bandcamp page is a link — the old code assumed anything non-audio/video was
+// an image and rendered a broken one.
+function isMediaUrl(url: string): boolean {
+  const path = url.split("?")[0].toLowerCase();
+  return /\.(mp3|m4a|wav|ogg|aac|flac|mp4|webm|mov|m4v|jpg|jpeg|png|webp|gif|avif)$/.test(
+    path
+  );
 }
 
 function nearestOf(
@@ -442,6 +463,39 @@ function RewardMedia({ url }: { url: string }) {
   );
 }
 
+// Everything on one reward: each uploaded file or link, in the organiser's
+// order. Playable things embed; anything else becomes a labelled link.
+function RewardItems({ items }: { items: RewardItem[] }) {
+  if (!items.length) return null;
+  return (
+    <div className="space-y-3">
+      {items.map((item, i) =>
+        item.kind === "file" || isMediaUrl(item.url) ? (
+          <div key={`${item.url}-${i}`}>
+            {item.label && (
+              <p className="mb-1.5 text-xs font-medium uppercase tracking-[0.2em] text-ink/50">
+                {item.label}
+              </p>
+            )}
+            <RewardMedia url={item.url} />
+          </div>
+        ) : (
+          <a
+            key={`${item.url}-${i}`}
+            href={item.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center justify-between gap-3 rounded-2xl border border-forest/40 px-4 py-3.5 text-sm font-medium text-forest-deep transition hover:border-forest active:scale-[0.99]"
+          >
+            <span className="min-w-0 truncate">{item.label ?? "Open link"}</span>
+            <span aria-hidden>↗</span>
+          </a>
+        )
+      )}
+    </div>
+  );
+}
+
 // A copyable discount code with its own copy state, so several can appear at
 // once (one per collected stop) without sharing a single "Copied ✓".
 function DiscountCodeBlock({
@@ -484,7 +538,7 @@ function DiscountCodeBlock({
 function JourneyRewardCard({
   title,
   teaser,
-  contentUrl,
+  items,
   discountCode,
   ticketUrl,
   onTicket,
@@ -492,7 +546,7 @@ function JourneyRewardCard({
 }: {
   title: string;
   teaser: string | null;
-  contentUrl: string | null;
+  items: RewardItem[];
   discountCode: string | null;
   ticketUrl?: string;
   onTicket?: () => void;
@@ -506,9 +560,9 @@ function JourneyRewardCard({
     >
       <p className="text-sm font-semibold text-ink">{title}</p>
       {teaser && <p className="mt-1 text-sm text-ink/60">{teaser}</p>}
-      {contentUrl && (
+      {items.length > 0 && (
         <div className="mt-3">
-          <RewardMedia url={contentUrl} />
+          <RewardItems items={items} />
         </div>
       )}
       {discountCode && (
@@ -626,7 +680,7 @@ function JourneyHub({
               key={s.location_id}
               title={s.location_name}
               teaser={s.reward_teaser}
-              contentUrl={s.reward_content_url}
+              items={s.items ?? []}
               discountCode={s.discount_code}
               ticketUrl={s.ticket_url}
               onTicket={() => openTicket(s.ticket_url)}
@@ -654,7 +708,7 @@ function JourneyHub({
                     ? null
                     : "Your reward for finishing the journey."
                 }
-                contentUrl={finale.reward_content_url}
+                items={finale.items ?? []}
                 discountCode={finale.discount_code}
                 ticketUrl={finale.ticket_url}
                 onTicket={() => openTicket(finale.ticket_url)}
@@ -1851,33 +1905,7 @@ export default function FanPage({
               )}
             </div>
 
-            {reward.reward_content_url && (
-              <div className="rounded-2xl bg-forest-deep p-4">
-                {mediaKind(reward.reward_content_url) === "audio" && (
-                  <audio
-                    controls
-                    src={reward.reward_content_url}
-                    className="w-full"
-                  />
-                )}
-                {mediaKind(reward.reward_content_url) === "video" && (
-                  <video
-                    controls
-                    playsInline
-                    src={reward.reward_content_url}
-                    className="w-full rounded-xl"
-                  />
-                )}
-                {mediaKind(reward.reward_content_url) === "image" && (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={reward.reward_content_url}
-                    alt="Your unlocked reward"
-                    className="w-full rounded-xl"
-                  />
-                )}
-              </div>
-            )}
+            <RewardItems items={reward.items ?? []} />
 
             {reward.discount_code && (
               <div className="rounded-2xl bg-forest p-5 text-center text-parchment">
