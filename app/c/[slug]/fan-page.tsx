@@ -122,22 +122,37 @@ type Step =
 
 // Owner-only preview. The payload is assembled server-side in page.tsx
 // after an ownership check — when present, this component renders entirely
-// from it: no fetches, no geolocation, no tracking, no claims.
+// from it: no fetches, no geolocation, no tracking, no claims. Journey
+// campaigns also carry every stop's reward and the finale, so the preview
+// can render the collect-them-all states with real content.
 export type PreviewPayload = {
   campaign: Campaign;
   locations: SpotLocation[];
   reward: Reward;
+  campaignType: string;
+  journeyStops: StopReward[];
+  finale: FinaleReward | null;
 };
 
-// The fan-visible states an owner can flick between in preview.
-const PREVIEW_STATES = [
-  { step: "cover", label: "Cover" },
-  { step: "landing", label: "Landing" },
-  { step: "locked", label: "Locked (near miss)" },
-  { step: "unlocked", label: "Unlocked" },
-  { step: "expired", label: "Expired" },
-] as const;
-type PreviewStep = (typeof PREVIEW_STATES)[number]["step"];
+// The fan-visible states an owner can flick between in preview. Journeys get
+// their own set (there's no single "unlocked" moment). Keys drive the switch;
+// several journey keys resolve to the same landing render with different
+// synthetic collection state.
+type PreviewStateDef = { key: string; label: string };
+const SINGLE_PREVIEW_STATES: PreviewStateDef[] = [
+  { key: "cover", label: "Cover" },
+  { key: "landing", label: "Landing" },
+  { key: "locked", label: "Locked (near miss)" },
+  { key: "unlocked", label: "Unlocked" },
+  { key: "expired", label: "Expired" },
+];
+const JOURNEY_PREVIEW_STATES: PreviewStateDef[] = [
+  { key: "cover", label: "Cover" },
+  { key: "j-landing", label: "Landing" },
+  { key: "j-mid", label: "Mid-journey" },
+  { key: "j-finale", label: "Finale" },
+  { key: "expired", label: "Expired" },
+];
 
 const SESSION_KEY = "ta_session_id";
 const CLAIM_DEBOUNCE_MS = 15_000;
@@ -847,6 +862,9 @@ export default function FanPage({
   // Which controls the owner has tapped in preview — each shows a small
   // "disabled in preview" note instead of doing its real work.
   const [previewBlocked, setPreviewBlocked] = useState<string | null>(null);
+  // Which preview state button is active — its own key rather than `step`,
+  // because several journey states share the landing render.
+  const [previewKey, setPreviewKey] = useState("cover");
   const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [locations, setLocations] = useState<SpotLocation[]>([]);
   const [reward, setReward] = useState<Reward | null>(null);
@@ -981,6 +999,8 @@ export default function FanPage({
     setCampaign(preview.campaign);
     setLocations(preview.locations);
     setReward(preview.reward);
+    setIsJourney(preview.campaignType === "journey");
+    setPreviewKey("cover");
     setStep("cover");
   }, [preview]);
 
@@ -1361,11 +1381,61 @@ export default function FanPage({
   // distance ring, closest-spot card and near-miss copy all render with
   // realistic numbers against the campaign's real locations. Purely local
   // state — none of the real entry points (watcher, claim, track) run.
-  const goToPreviewState = (target: PreviewStep) => {
+  const goToPreviewState = (key: string) => {
     if (!preview) return;
     setPreviewBlocked(null);
-    setNearMiss(target === "locked");
-    if (target === "locked") {
+    setPreviewKey(key);
+
+    if (key === "cover") {
+      setNearMiss(false);
+      setStep("cover");
+      return;
+    }
+    if (key === "expired") {
+      setNearMiss(false);
+      setStep("expired");
+      return;
+    }
+
+    // Journey states are all rendered by the landing/hub, differing only in
+    // the synthetic collection state fed to it.
+    if (isJourneyRef.current) {
+      const stops = preview.journeyStops;
+      const total = preview.locations.length;
+      setNearMiss(false);
+      if (key === "j-landing") {
+        setJourney({
+          progress: { collected: 0, total },
+          complete: false,
+          collected: [],
+          finale: null,
+        });
+        setJustUnlocked(null);
+      } else if (key === "j-mid") {
+        const some = stops.slice(0, Math.max(1, Math.ceil(total / 2)));
+        setJourney({
+          progress: { collected: some.length, total },
+          complete: false,
+          collected: some,
+          finale: null,
+        });
+        setJustUnlocked(some[some.length - 1] ?? null);
+      } else if (key === "j-finale") {
+        setJourney({
+          progress: { collected: total, total },
+          complete: true,
+          collected: stops,
+          finale: preview.finale,
+        });
+        setJustUnlocked(null);
+      }
+      setStep("landing");
+      return;
+    }
+
+    // Single drop.
+    setNearMiss(key === "locked");
+    if (key === "locked") {
       const l0 = preview.locations[0];
       if (l0) {
         // Just outside the radius — a genuine "right at the edge" miss.
@@ -1374,7 +1444,7 @@ export default function FanPage({
         setPosition({ lat: l0.lat + missM / 111320, lng: l0.lng, accuracy: 12 });
       }
     }
-    setStep(target);
+    setStep(key as Step);
   };
 
   const bgUrl = campaign?.background_image_path
@@ -1394,20 +1464,22 @@ export default function FanPage({
               Preview — this is what fans will see
             </p>
             <div className="flex flex-wrap gap-1.5">
-              {PREVIEW_STATES.map((s) => (
-                <button
-                  key={s.step}
-                  type="button"
-                  onClick={() => goToPreviewState(s.step)}
-                  className={`rounded-full px-3 py-1 text-xs font-medium transition ${
-                    step === s.step
-                      ? "bg-parchment text-forest-deep"
-                      : "border border-parchment/40 text-parchment/90 hover:border-parchment"
-                  }`}
-                >
-                  {s.label}
-                </button>
-              ))}
+              {(isJourney ? JOURNEY_PREVIEW_STATES : SINGLE_PREVIEW_STATES).map(
+                (s) => (
+                  <button
+                    key={s.key}
+                    type="button"
+                    onClick={() => goToPreviewState(s.key)}
+                    className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                      previewKey === s.key
+                        ? "bg-parchment text-forest-deep"
+                        : "border border-parchment/40 text-parchment/90 hover:border-parchment"
+                    }`}
+                  >
+                    {s.label}
+                  </button>
+                )
+              )}
             </div>
           </div>
         </div>

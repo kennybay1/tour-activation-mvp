@@ -1,6 +1,7 @@
 import FanPage, { type PreviewPayload } from "./fan-page";
 import { getAdminUser, getSessionUser } from "@/lib/supabase-server";
 import { supabaseAdmin } from "@/lib/supabase-admin";
+import { stopReward, finaleReward } from "@/lib/journey";
 
 // Owner-only preview. With ?preview=1 the status gate is bypassed ONLY when
 // the requester has an authenticated session AND owns the campaign (or is
@@ -24,7 +25,9 @@ async function loadPreview(slug: string): Promise<PreviewPayload | null> {
 
   const { data: locs } = await db
     .from("campaign_locations")
-    .select("id, location_name, lat, lng, radius_m")
+    .select(
+      "id, location_name, lat, lng, radius_m, sort_order, reward_teaser, reward_content_url, reward_storage_path, discount_code, ticket_url"
+    )
     .eq("campaign_id", c.id)
     .order("sort_order");
 
@@ -37,6 +40,14 @@ async function loadPreview(slug: string): Promise<PreviewPayload | null> {
       .createSignedUrl(c.reward_storage_path, 60 * 60 * 2);
     if (signed?.signedUrl) rewardContentUrl = signed.signedUrl;
   }
+
+  // Journey preview content: every stop's reward and the finale, assembled
+  // the same server-only way as a real unlock (owner is the viewer here).
+  const isJourney = c.campaign_type === "journey";
+  const journeyStops = isJourney
+    ? await Promise.all((locs ?? []).map((l) => stopReward(db, l)))
+    : [];
+  const finale = isJourney ? await finaleReward(db, c) : null;
 
   // Built field-by-field on purpose: spreading the service-role row would
   // silently leak any column added to `campaigns` later.
@@ -71,6 +82,9 @@ async function loadPreview(slug: string): Promise<PreviewPayload | null> {
       ...(c.ticket_url ? { ticket_url: c.ticket_url } : {}),
       location_name: locs?.[0]?.location_name ?? null,
     },
+    campaignType: c.campaign_type ?? "single",
+    journeyStops,
+    finale,
   };
 }
 
