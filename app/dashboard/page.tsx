@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { requireUser, supabaseServer } from "@/lib/supabase-server";
 import StatusActions from "./campaigns/status-actions";
+import ProfileBackdrop from "./profile-backdrop";
 
 const STATUS_STYLES: Record<string, string> = {
   live: "bg-forest text-parchment",
@@ -17,7 +18,17 @@ function fmt(iso: string) {
 }
 
 export default async function DashboardHome() {
-  await requireUser();
+  const user = await requireUser();
+
+  // The organiser's backdrop lives in their auth profile metadata — set
+  // only through /api/dashboard/profile/background, owner-authenticated.
+  const backdropPath =
+    typeof user.user_metadata?.dashboard_background_path === "string"
+      ? user.user_metadata.dashboard_background_path
+      : null;
+  const backdropUrl = backdropPath
+    ? `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/backgrounds/${backdropPath}`
+    : null;
 
   // Authenticated client — RLS returns only campaigns this organiser owns.
   const supabase = await supabaseServer();
@@ -29,15 +40,43 @@ export default async function DashboardHome() {
     .order("created_at", { ascending: false });
 
   return (
-    <div className="fade-up">
-      <div className="flex items-center justify-between gap-4">
+    <>
+      {backdropUrl && (
+        // Same full-bleed treatment as the fan page: fixed image, cropped
+        // to fill, with an edge scrim; the campaign list floats above it in
+        // a translucent panel so text stays readable over any photo. Kept
+        // OUTSIDE the .fade-up wrapper — its entrance transform would turn
+        // "fixed" into "fixed inside this box" and shrink the image to the
+        // panel's footprint.
+        <div className="fixed inset-0 z-0" aria-hidden="true">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={backdropUrl}
+            alt=""
+            className="h-full w-full object-cover"
+          />
+          <div className="absolute inset-0 bg-gradient-to-b from-black/25 via-black/10 to-black/35" />
+        </div>
+      )}
+      <div className="fade-up">
+      <div
+        className={
+          backdropUrl
+            ? "relative z-10 rounded-3xl bg-cream/90 p-6 shadow-xl backdrop-blur-md sm:p-8"
+            : undefined
+        }
+      >
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
         <h1 className="font-serif text-3xl">Your campaigns</h1>
-        <Link
-          href="/dashboard/campaigns/new"
-          className="rounded-full bg-forest-deep px-5 py-2.5 text-sm font-semibold text-parchment transition active:scale-[0.98]"
-        >
-          New campaign
-        </Link>
+        <div className="flex flex-wrap items-center gap-2">
+          <ProfileBackdrop hasImage={!!backdropUrl} />
+          <Link
+            href="/dashboard/campaigns/new"
+            className="rounded-full bg-forest-deep px-5 py-2.5 text-sm font-semibold text-parchment transition active:scale-[0.98]"
+          >
+            New campaign
+          </Link>
+        </div>
       </div>
 
       {error ? (
@@ -99,6 +138,8 @@ export default async function DashboardHome() {
           ))}
         </ul>
       )}
-    </div>
+      </div>
+      </div>
+    </>
   );
 }

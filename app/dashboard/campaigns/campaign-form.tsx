@@ -15,6 +15,11 @@ import {
   MAX_LOCATIONS,
 } from "./location-types";
 import { useUnsavedChanges } from "@/app/unsaved-changes";
+import {
+  BG_ALLOWED_RE,
+  BG_MAX_BYTES,
+  processBackgroundImage,
+} from "@/lib/background-image";
 
 // Leaflet touches window/document at import time, so it can only run in
 // the browser — ssr:false is required here, and next/dynamic only allows
@@ -81,45 +86,12 @@ function isoToLocal(iso?: string): string {
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
 const ALLOWED_FILE_RE = /\.(mp3|m4a|mp4|jpg|jpeg|png|webp)$/i;
 
-const BG_MAX_BYTES = 8 * 1024 * 1024;
-const BG_ALLOWED_RE = /\.(jpg|jpeg|png|webp)$/i;
-// Fans load the background on mobile data at the very top of the funnel —
-// anything bigger than this on the long edge gets downscaled and
-// re-encoded before upload.
-const BG_MAX_EDGE = 2400;
-
 function sanitizeFilename(name: string): string {
   return name
     .toLowerCase()
     .replace(/[^a-z0-9.]+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
-}
-
-// Downscale to BG_MAX_EDGE and re-encode as WebP (JPEG where WebP encoding
-// isn't supported). Runs at pick time so the preview shows exactly what
-// will be uploaded, and saving stays fast.
-async function processBackgroundImage(
-  file: File
-): Promise<{ blob: Blob; ext: string }> {
-  const bitmap = await createImageBitmap(file);
-  const scale = Math.min(1, BG_MAX_EDGE / Math.max(bitmap.width, bitmap.height));
-  const w = Math.max(1, Math.round(bitmap.width * scale));
-  const h = Math.max(1, Math.round(bitmap.height * scale));
-  const canvas = document.createElement("canvas");
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return { blob: file, ext: file.name.split(".").pop() ?? "jpg" };
-  ctx.drawImage(bitmap, 0, 0, w, h);
-  bitmap.close();
-  const encode = (type: string) =>
-    new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, type, 0.85));
-  const webp = await encode("image/webp");
-  if (webp && webp.type === "image/webp") return { blob: webp, ext: "webp" };
-  const jpeg = await encode("image/jpeg");
-  if (jpeg) return { blob: jpeg, ext: "jpg" };
-  return { blob: file, ext: file.name.split(".").pop() ?? "jpg" };
 }
 
 function validateLocations(

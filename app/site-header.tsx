@@ -70,7 +70,11 @@ export default function SiteHeader({
     "text-sm font-medium text-ink/80 underline-offset-4 hover:underline";
 
   return (
-    <header className="border-b border-ink/20">
+    // Positioned above z-0 content: the dashboard's full-bleed backdrop is
+    // a fixed image, and without a stacking order the header would paint
+    // underneath it. The translucent cream + blur keeps the ink-coloured
+    // links readable over any photo; on plain cream pages it's invisible.
+    <header className="relative z-30 border-b border-ink/20 bg-cream/80 backdrop-blur-md">
       <div className="mx-auto flex w-full max-w-4xl items-center justify-between px-5 py-4">
         <GuardedLink href="/" className="font-serif text-xl italic">
           Moments
