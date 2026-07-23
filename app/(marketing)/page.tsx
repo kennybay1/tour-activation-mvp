@@ -69,12 +69,9 @@ export default function Home() {
           <span className="h-2 w-2 rounded-full bg-forest" />
         </div>
         <h1 className="mt-8 font-serif text-6xl">Moments</h1>
-        <p className="mt-4 text-xl text-ink/80">
-          Geo-fenced fan engagement for artist teams.
-        </p>
+        <p className="mt-4 text-xl text-ink/80">IRL drop zones</p>
         <p className="mt-2 max-w-xl leading-relaxed text-ink/60">
-          First-party data from dropping exclusive content at real-world
-          locations.
+          Engage fans | Own the relationship
         </p>
         <div className="mt-8 flex flex-wrap items-center justify-center gap-4">
           <Link
