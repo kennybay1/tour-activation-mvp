@@ -1,6 +1,5 @@
 import { requireAdmin } from "@/lib/supabase-server";
 import { supabaseAdmin } from "@/lib/supabase-admin";
-import ApproveToggle from "./approve-toggle";
 
 export const dynamic = "force-dynamic";
 
@@ -12,7 +11,7 @@ export default async function AccountsPage() {
     await Promise.all([
       db
         .from("profiles")
-        .select("id, org_name, contact_name, is_approved, is_admin, created_at")
+        .select("id, org_name, contact_name, is_admin, created_at")
         .order("created_at", { ascending: false }),
       db.auth.admin.listUsers(),
       db.from("campaigns").select("owner_id"),
@@ -41,7 +40,6 @@ export default async function AccountsPage() {
                 <th className="px-3 py-3 font-medium">Email</th>
                 <th className="px-3 py-3 font-medium">Joined</th>
                 <th className="px-3 py-3 text-right font-medium">Campaigns</th>
-                <th className="px-3 py-3 text-right font-medium">Approval</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-ink/15">
@@ -66,12 +64,6 @@ export default async function AccountsPage() {
                   </td>
                   <td className="px-3 py-3 text-right font-mono text-xs">
                     {countByOwner.get(p.id) ?? 0}
-                  </td>
-                  <td className="px-3 py-3 text-right">
-                    <ApproveToggle
-                      profileId={p.id}
-                      approved={p.is_approved}
-                    />
                   </td>
                 </tr>
               ))}

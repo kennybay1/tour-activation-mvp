@@ -39,15 +39,7 @@ export default async function AdminHome() {
 
   return (
     <div className="fade-up">
-      <div className="flex items-center justify-between gap-4">
-        <h1 className="font-serif text-3xl">All campaigns</h1>
-        <Link
-          href="/admin/campaigns/new"
-          className="rounded-full bg-forest-deep px-5 py-2.5 text-sm font-semibold text-parchment transition active:scale-[0.98]"
-        >
-          Create campaign as…
-        </Link>
-      </div>
+      <h1 className="font-serif text-3xl">All campaigns</h1>
 
       {error ? (
         <p className="mt-6 font-medium text-clay">Couldn&apos;t load campaigns.</p>
@@ -112,20 +104,12 @@ export default async function AdminHome() {
                       {s?.unlocks ?? 0}
                     </td>
                     <td className="px-3 py-3">
-                      <span className="flex gap-3">
-                        <Link
-                          href={`/admin/campaigns/${c.id}/results`}
-                          className="font-medium text-ink/70 underline underline-offset-4 hover:text-ink"
-                        >
-                          Results
-                        </Link>
-                        <Link
-                          href={`/admin/campaigns/${c.id}/edit`}
-                          className="font-medium text-ink/70 underline underline-offset-4 hover:text-ink"
-                        >
-                          Edit
-                        </Link>
-                      </span>
+                      <Link
+                        href={`/admin/campaigns/${c.id}/results`}
+                        className="font-medium text-ink/70 underline underline-offset-4 hover:text-ink"
+                      >
+                        Results
+                      </Link>
                     </td>
                   </tr>
                 );
