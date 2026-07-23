@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 import { buildJourneyState, type JourneyState } from "@/lib/journey";
+import { isEmailConfigured } from "@/lib/email";
 
 // Read-only: what stops has THIS session already collected on a journey, and
 // is the set complete? Powers the fan page's progress + "your collection" on
@@ -11,8 +12,8 @@ import { buildJourneyState, type JourneyState } from "@/lib/journey";
 type ProgressResponse =
   | { status: "not_found" }
   | { mode: "single" }
-  | { mode: "journey"; live: false }
-  | ({ mode: "journey"; live: true } & JourneyState)
+  | { mode: "journey"; live: false; email_available: boolean }
+  | ({ mode: "journey"; live: true; email_available: boolean } & JourneyState)
   | { error: string };
 
 export async function POST(
@@ -69,8 +70,13 @@ export async function POST(
     campaign.is_active &&
     now >= new Date(campaign.starts_at) &&
     now <= new Date(campaign.ends_at);
+  const emailAvailable = isEmailConfigured();
   if (!live) {
-    return NextResponse.json({ mode: "journey", live: false });
+    return NextResponse.json({
+      mode: "journey",
+      live: false,
+      email_available: emailAvailable,
+    });
   }
 
   const { data: locations, error: locationsError } = await db
@@ -89,5 +95,10 @@ export async function POST(
     locations ?? [],
     session_id
   );
-  return NextResponse.json({ mode: "journey", live: true, ...state });
+  return NextResponse.json({
+    mode: "journey",
+    live: true,
+    email_available: emailAvailable,
+    ...state,
+  });
 }

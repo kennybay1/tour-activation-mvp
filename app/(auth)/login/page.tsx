@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
@@ -10,12 +10,27 @@ const inputCls =
 const labelCls =
   "mb-2 mt-4 block text-xs font-medium uppercase tracking-[0.2em] text-ink/60";
 
+// Only ever follow an internal path — never an absolute URL — so ?next=
+// can't be turned into an open redirect.
+function safeInternalPath(raw: string | null): string {
+  return raw && raw.startsWith("/") && !raw.startsWith("//") ? raw : "";
+}
+
 export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [next, setNext] = useState("");
+
+  useEffect(() => {
+    try {
+      setNext(
+        safeInternalPath(new URLSearchParams(window.location.search).get("next"))
+      );
+    } catch {}
+  }, []);
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -30,7 +45,7 @@ export default function LoginPage() {
       setBusy(false);
       return;
     }
-    router.replace("/dashboard");
+    router.replace(next || "/dashboard");
     router.refresh();
   };
 
@@ -76,7 +91,7 @@ export default function LoginPage() {
 
       <div className="mt-4 flex items-center justify-between text-sm text-ink/60">
         <Link
-          href="/signup"
+          href={next ? `/signup?next=${encodeURIComponent(next)}` : "/signup"}
           className="font-medium text-clay underline underline-offset-4"
         >
           Create an account

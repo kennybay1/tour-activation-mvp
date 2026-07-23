@@ -85,6 +85,9 @@ export default function SiteHeader({
             <GuardedLink href="/dashboard" className={navLink}>
               Campaigns
             </GuardedLink>
+            <GuardedLink href="/dashboard/team" className={navLink}>
+              Team
+            </GuardedLink>
             {current.isAdmin && (
               <GuardedLink href="/admin" className={navLink}>
                 Admin

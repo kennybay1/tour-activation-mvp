@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionUser } from "@/lib/supabase-server";
+import { getSessionUser, campaignAccess } from "@/lib/supabase-server";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 
 // Background image upload/removal for a campaign the signed-in organiser
@@ -21,11 +21,14 @@ const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
 
 type BackgroundResponse = { path: string } | { ok: true } | { error: string };
 
-// Returns the campaign row only if the signed-in user owns it — the
-// service role bypasses RLS, so this check is the security boundary.
+// Returns the campaign row only if the signed-in user may access it — the
+// owner or a workspace member. The service role bypasses RLS, so this check
+// is the security boundary.
 async function ownedCampaign(id: string) {
   const user = await getSessionUser();
   if (!user) return { error: 401 as const };
+  const access = await campaignAccess(user.id, id);
+  if (!access.ok) return { error: 404 as const };
   const db = supabaseAdmin();
   const { data: campaign, error } = await db
     .from("campaigns")
@@ -33,7 +36,7 @@ async function ownedCampaign(id: string) {
     .eq("id", id)
     .maybeSingle();
   if (error) return { error: 500 as const };
-  if (!campaign || campaign.owner_id !== user.id) return { error: 404 as const };
+  if (!campaign) return { error: 404 as const };
   return { user, campaign, db };
 }
 

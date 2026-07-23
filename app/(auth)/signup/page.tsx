@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 
@@ -9,7 +9,20 @@ const inputCls =
 const labelCls =
   "mb-2 mt-4 block text-xs font-medium uppercase tracking-[0.2em] text-ink/60";
 
+function safeInternalPath(raw: string | null): string {
+  return raw && raw.startsWith("/") && !raw.startsWith("//") ? raw : "";
+}
+
 export default function SignupPage() {
+  const [next, setNext] = useState("");
+  useEffect(() => {
+    try {
+      setNext(
+        safeInternalPath(new URLSearchParams(window.location.search).get("next"))
+      );
+    } catch {}
+  }, []);
+  const loginHref = next ? `/login?next=${encodeURIComponent(next)}` : "/login";
   const [orgName, setOrgName] = useState("");
   const [contactName, setContactName] = useState("");
   const [email, setEmail] = useState("");
@@ -49,7 +62,7 @@ export default function SignupPage() {
           start building your first drop.
         </p>
         <Link
-          href="/login"
+          href={loginHref}
           className="mt-8 block w-full rounded-full bg-forest-deep py-3.5 text-center font-semibold text-parchment transition active:scale-[0.98]"
         >
           Go to sign in
@@ -128,7 +141,7 @@ export default function SignupPage() {
       <p className="mt-4 text-center text-sm text-ink/60">
         Already have an account?{" "}
         <Link
-          href="/login"
+          href={loginHref}
           className="font-medium text-clay underline underline-offset-4"
         >
           Sign in

@@ -34,12 +34,15 @@ export default function CampaignRow({
   c,
   locationCount,
   thumbnailUrl,
+  shared,
 }: {
   c: CampaignListItem;
   locationCount: number;
   // The campaign's own artwork, or the organiser's dashboard backdrop as a
   // stand-in when none was uploaded — resolved by the page, not here.
   thumbnailUrl: string | null;
+  // A campaign owned by someone whose workspace you're a collaborator in.
+  shared?: boolean;
 }) {
   const locationSummary =
     locationCount === 0
@@ -85,6 +88,11 @@ export default function CampaignRow({
         >
           {c.status}
         </span>
+        {shared && (
+          <span className="shrink-0 rounded-full border border-ink/25 px-2.5 py-0.5 text-xs font-medium text-ink/55">
+            Shared with you
+          </span>
+        )}
       </div>
       {c.description && (
         <p className="mt-1 max-w-prose text-sm text-ink/60">{c.description}</p>

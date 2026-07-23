@@ -77,3 +77,28 @@ export async function requireUser(): Promise<User> {
   if (!user) redirect("/login");
   return user;
 }
+
+// True if the user owns the campaign OR is a member of the owner's workspace.
+// The RLS policies enforce this for the browser client; this mirror is for the
+// server paths that use the service role (which bypasses RLS) and so must
+// check access themselves. Returns the resolved owner_id when accessible.
+export async function campaignAccess(
+  userId: string,
+  campaignId: string
+): Promise<{ ok: boolean; ownerId?: string }> {
+  const db = supabaseAdmin();
+  const { data: campaign } = await db
+    .from("campaigns")
+    .select("owner_id")
+    .eq("id", campaignId)
+    .maybeSingle();
+  if (!campaign) return { ok: false };
+  if (campaign.owner_id === userId) return { ok: true, ownerId: campaign.owner_id };
+  const { data: member } = await db
+    .from("workspace_members")
+    .select("owner_id")
+    .eq("owner_id", campaign.owner_id)
+    .eq("member_id", userId)
+    .maybeSingle();
+  return { ok: !!member, ownerId: campaign.owner_id };
+}

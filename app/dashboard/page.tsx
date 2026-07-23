@@ -23,7 +23,7 @@ export default async function DashboardHome() {
     supabase
       .from("campaigns")
       .select(
-        "id, slug, title, artist_name, description, status, starts_at, ends_at, background_image_path"
+        "id, slug, title, artist_name, description, status, starts_at, ends_at, background_image_path, owner_id"
       )
       .order("created_at", { ascending: false }),
     supabase.from("campaign_locations").select("campaign_id"),
@@ -98,6 +98,7 @@ export default async function DashboardHome() {
                     key={c.id}
                     c={c as CampaignListItem}
                     locationCount={locationCounts.get(c.id) ?? 0}
+                    shared={c.owner_id !== user.id}
                     thumbnailUrl={
                       thumbPath
                         ? `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/backgrounds/${thumbPath}`

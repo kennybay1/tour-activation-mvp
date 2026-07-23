@@ -1,5 +1,9 @@
 import FanPage, { type PreviewPayload } from "./fan-page";
-import { getAdminUser, getSessionUser } from "@/lib/supabase-server";
+import {
+  getAdminUser,
+  getSessionUser,
+  campaignAccess,
+} from "@/lib/supabase-server";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 import { stopReward, finaleReward } from "@/lib/journey";
 import { rewardItems } from "@/lib/rewards";
@@ -22,7 +26,11 @@ async function loadPreview(slug: string): Promise<PreviewPayload | null> {
     .eq("slug", slug)
     .maybeSingle();
   if (!c) return null;
-  if (c.owner_id !== user.id && !(await getAdminUser())) return null;
+  // Owner, a workspace member, or the platform admin may preview.
+  if (c.owner_id !== user.id) {
+    const access = await campaignAccess(user.id, c.id);
+    if (!access.ok && !(await getAdminUser())) return null;
+  }
 
   const { data: locs } = await db
     .from("campaign_locations")

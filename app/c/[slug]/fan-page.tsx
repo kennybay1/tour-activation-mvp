@@ -166,6 +166,7 @@ const JOURNEY_PREVIEW_STATES: PreviewStateDef[] = [
 ];
 
 const SESSION_KEY = "ta_session_id";
+const EMAIL_INPUT_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const CLAIM_DEBOUNCE_MS = 15_000;
 // Once a fan submits or dismisses the email ask for a campaign, never
 // prompt them again on this device.
@@ -615,15 +616,20 @@ function JourneySaveCard({
   collectedCount,
   saved,
   inert,
+  emailAvailable,
   onSave,
+  onSecureLink,
 }: {
   collectedCount: number;
   saved: boolean;
   inert?: boolean;
+  // When true, offer the verified "email me a secure link" restore.
+  emailAvailable: boolean;
   onSave: (
     email: string,
     consent: boolean
   ) => Promise<{ ok: boolean; restoredCount?: number; error?: string }>;
+  onSecureLink: (email: string) => Promise<{ ok: boolean; error?: string }>;
 }) {
   const [email, setEmail] = useState("");
   const [consent, setConsent] = useState(false);
@@ -631,6 +637,7 @@ function JourneySaveCard({
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [inertNote, setInertNote] = useState(false);
+  const [linkSent, setLinkSent] = useState(false);
 
   if (saved && !note) {
     return (
@@ -667,10 +674,42 @@ function JourneySaveCard({
     );
   };
 
+  const sendLink = async () => {
+    if (inert) {
+      setInertNote(true);
+      return;
+    }
+    if (!EMAIL_INPUT_RE.test(email.trim())) {
+      setError("Enter your email above first.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const res = await onSecureLink(email.trim());
+    setBusy(false);
+    if (!res.ok) {
+      setError(res.error ?? "That didn't go through — try again.");
+      return;
+    }
+    setLinkSent(true);
+  };
+
   if (note) {
     return (
       <div className="rounded-2xl border border-forest/30 bg-forest/5 p-4 text-center">
         <p className="text-sm font-medium text-forest-deep">{note}</p>
+      </div>
+    );
+  }
+
+  if (linkSent) {
+    return (
+      <div className="rounded-2xl border border-forest/30 bg-forest/5 p-4 text-center">
+        <p className="text-sm font-medium text-forest-deep">Check your email</p>
+        <p className="mt-1 text-sm text-ink/60">
+          If a collection is saved to that address, we&apos;ve sent a link to
+          restore it. It expires in an hour.
+        </p>
       </div>
     );
   }
@@ -719,6 +758,16 @@ function JourneySaveCard({
         />
         <span>Also keep me posted about future drops (optional).</span>
       </label>
+      {emailAvailable && (
+        <button
+          type="button"
+          onClick={sendLink}
+          disabled={busy}
+          className="mt-3 text-xs font-medium text-forest underline underline-offset-4 disabled:opacity-50"
+        >
+          Or email me a secure link instead
+        </button>
+      )}
       {error && <p className="mt-2 text-xs font-medium text-clay">{error}</p>}
       {inertNote && (
         <p className="mt-2 text-xs text-ink/50">Disabled in preview.</p>
@@ -747,7 +796,9 @@ function JourneyHub({
   onTicket,
   emailSaved,
   saveInert,
+  emailAvailable,
   onSave,
+  onSecureLink,
   children,
 }: {
   campaign: Campaign;
@@ -764,10 +815,12 @@ function JourneyHub({
   onTicket: () => void;
   emailSaved: boolean;
   saveInert: boolean;
+  emailAvailable: boolean;
   onSave: (
     email: string,
     consent: boolean
   ) => Promise<{ ok: boolean; restoredCount?: number; error?: string }>;
+  onSecureLink: (email: string) => Promise<{ ok: boolean; error?: string }>;
   children: React.ReactNode;
 }) {
   const collected = journey?.collected ?? [];
@@ -849,7 +902,9 @@ function JourneyHub({
         collectedCount={collectedCount}
         saved={emailSaved}
         inert={saveInert}
+        emailAvailable={emailAvailable}
         onSave={onSave}
+        onSecureLink={onSecureLink}
       />
 
       {/* Grand finale, once every stop is collected */}
@@ -1096,6 +1151,9 @@ export default function FanPage({
   const [isJourney, setIsJourney] = useState(false);
   const [journey, setJourney] = useState<JourneyState | null>(null);
   const [justUnlocked, setJustUnlocked] = useState<StopReward | null>(null);
+  // Whether the server can send email — drives the "secure link" option. Off
+  // until the owner configures email, so it stays hidden from fans till then.
+  const [emailAvailable, setEmailAvailable] = useState(false);
   const isJourneyRef = useRef(isJourney);
   isJourneyRef.current = isJourney;
 
@@ -1292,6 +1350,7 @@ export default function FanPage({
           if (cancelled) return;
           if (pj.mode === "journey") {
             setIsJourney(true);
+            setEmailAvailable(pj.email_available === true);
             if (pj.live) {
               setJourney({
                 progress: pj.progress,
@@ -1525,6 +1584,39 @@ export default function FanPage({
       }
     },
     [slug, isPreview, campaign?.id, rememberEmailPrompt]
+  );
+
+  // Verified restore (Layer 2b): ask the server to email a secure link. The
+  // reply is intentionally the same whether or not that address has a
+  // collection, so nothing about who's on the list leaks.
+  const requestSecureLink = useCallback(
+    async (email: string): Promise<{ ok: boolean; error?: string }> => {
+      if (isPreview) return { ok: false, error: "preview" };
+      try {
+        const res = await fetch("/api/journey/send-link", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ slug, email }),
+        });
+        if (res.status === 429) {
+          return { ok: false, error: "Too many tries — give it a few minutes." };
+        }
+        const j = await res.json();
+        if (!res.ok || j.error || j.status === "expired") {
+          return {
+            ok: false,
+            error:
+              j.status === "expired"
+                ? "This drop has ended."
+                : "That didn't go through — check the address and try again.",
+          };
+        }
+        return { ok: true };
+      } catch {
+        return { ok: false, error: "Couldn't reach the server — try again." };
+      }
+    },
+    [slug, isPreview]
   );
 
   // ── Battery/lifecycle: item 7 ────────────────────────────────────────
@@ -1919,7 +2011,9 @@ export default function FanPage({
             }}
             emailSaved={emailPrompt === "done"}
             saveInert={isPreview}
+            emailAvailable={emailAvailable}
             onSave={saveJourneyCollection}
+            onSecureLink={requestSecureLink}
           >
             <LocationsCard
               locations={locations}
