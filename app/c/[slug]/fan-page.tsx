@@ -171,17 +171,44 @@ const CLAIM_DEBOUNCE_MS = 15_000;
 // prompt them again on this device.
 const EMAIL_PROMPT_KEY_PREFIX = "ta_email_prompt_";
 
-function getSessionId(): string {
+// The fan's anonymous id. The durable copy lives in a server-set cookie
+// (see /api/session) so it outlasts iOS Safari's ~7-day wipe of script
+// storage; local storage is only a fast fallback for when that call can't
+// be reached. Any existing local id is handed to the server to "adopt", so
+// a fan mid-journey keeps their collection through this change.
+async function resolveSessionId(): Promise<string> {
+  let local: string | null = null;
   try {
-    let id = localStorage.getItem(SESSION_KEY);
-    if (!id) {
-      id = crypto.randomUUID();
-      localStorage.setItem(SESSION_KEY, id);
+    local = localStorage.getItem(SESSION_KEY);
+  } catch {}
+
+  try {
+    const res = await fetch(
+      "/api/session" + (local ? `?adopt=${encodeURIComponent(local)}` : ""),
+      { cache: "no-store" }
+    );
+    if (res.ok) {
+      const { session_id } = (await res.json()) as { session_id?: string };
+      if (session_id) {
+        try {
+          localStorage.setItem(SESSION_KEY, session_id);
+        } catch {}
+        return session_id;
+      }
     }
-    return id;
-  } catch {
-    return "no-storage";
-  }
+  } catch {}
+
+  // Offline or the endpoint failed — keep the page working with the local id
+  // (or a fresh one), which the next successful call will make durable.
+  if (local) return local;
+  const fresh =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `no-storage-${Math.random().toString(36).slice(2)}`;
+  try {
+    localStorage.setItem(SESSION_KEY, fresh);
+  } catch {}
+  return fresh;
 }
 
 function isInAppBrowser(): boolean {
@@ -582,6 +609,124 @@ function JourneyRewardCard({
   );
 }
 
+// Save the collection to an email so it follows the fan across devices — and
+// restore it on a fresh one. Unverified by design: a typed address is proof.
+function JourneySaveCard({
+  collectedCount,
+  saved,
+  inert,
+  onSave,
+}: {
+  collectedCount: number;
+  saved: boolean;
+  inert?: boolean;
+  onSave: (
+    email: string,
+    consent: boolean
+  ) => Promise<{ ok: boolean; restoredCount?: number; error?: string }>;
+}) {
+  const [email, setEmail] = useState("");
+  const [consent, setConsent] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const [inertNote, setInertNote] = useState(false);
+
+  if (saved && !note) {
+    return (
+      <div className="rounded-2xl border border-forest/30 bg-forest/5 p-4 text-center">
+        <p className="text-sm font-medium text-forest-deep">
+          Saved to your email
+        </p>
+        <p className="mt-1 text-sm text-ink/60">
+          Enter the same address on another device to pick up where you left
+          off.
+        </p>
+      </div>
+    );
+  }
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (inert) {
+      setInertNote(true);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const res = await onSave(email.trim(), consent);
+    setBusy(false);
+    if (!res.ok) {
+      setError(res.error ?? "That didn't go through — try again.");
+      return;
+    }
+    setNote(
+      res.restoredCount && res.restoredCount > 0
+        ? `Welcome back — ${res.restoredCount} ${res.restoredCount === 1 ? "stop" : "stops"} restored.`
+        : "Saved — your collection will follow you."
+    );
+  };
+
+  if (note) {
+    return (
+      <div className="rounded-2xl border border-forest/30 bg-forest/5 p-4 text-center">
+        <p className="text-sm font-medium text-forest-deep">{note}</p>
+      </div>
+    );
+  }
+
+  return (
+    <form
+      onSubmit={submit}
+      noValidate={inert}
+      className="rounded-2xl border border-ink/25 p-4"
+    >
+      <p className="text-sm font-medium text-ink/80">
+        {collectedCount === 0
+          ? "Been here before?"
+          : "Save your collection"}
+      </p>
+      <p className="mt-1 text-sm text-ink/60">
+        {collectedCount === 0
+          ? "Enter your email to restore a collection from another device."
+          : "Add your email so your collection follows you to any device."}
+      </p>
+      <div className="mt-3 flex gap-2">
+        <input
+          type="email"
+          required
+          inputMode="email"
+          autoComplete="email"
+          placeholder="you@example.com"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          className="min-w-0 flex-1 rounded-xl border border-ink/30 bg-transparent px-4 py-2.5 text-ink placeholder-ink/30 outline-none focus:border-forest"
+        />
+        <button
+          type="submit"
+          disabled={busy}
+          className="shrink-0 rounded-full bg-forest-deep px-5 py-2.5 text-sm font-semibold text-parchment transition active:scale-[0.98] disabled:opacity-50"
+        >
+          {busy ? "…" : collectedCount === 0 ? "Restore" : "Save"}
+        </button>
+      </div>
+      <label className="mt-3 flex items-start gap-2 text-xs text-ink/70">
+        <input
+          type="checkbox"
+          checked={consent}
+          onChange={(e) => setConsent(e.target.checked)}
+          className="mt-0.5 h-4 w-4 shrink-0 accent-forest"
+        />
+        <span>Also keep me posted about future drops (optional).</span>
+      </label>
+      {error && <p className="mt-2 text-xs font-medium text-clay">{error}</p>}
+      {inertNote && (
+        <p className="mt-2 text-xs text-ink/50">Disabled in preview.</p>
+      )}
+    </form>
+  );
+}
+
 // The collect-them-all hub — one evolving screen for a Journey. Shows the
 // running progress, the growing collection of stop rewards, a prompt to find
 // the next stop, and the grand finale once every stop is in. The map card
@@ -600,6 +745,9 @@ function JourneyHub({
   busy,
   previewBlocked,
   onTicket,
+  emailSaved,
+  saveInert,
+  onSave,
   children,
 }: {
   campaign: Campaign;
@@ -614,6 +762,12 @@ function JourneyHub({
   busy: boolean;
   previewBlocked: boolean;
   onTicket: () => void;
+  emailSaved: boolean;
+  saveInert: boolean;
+  onSave: (
+    email: string,
+    consent: boolean
+  ) => Promise<{ ok: boolean; restoredCount?: number; error?: string }>;
   children: React.ReactNode;
 }) {
   const collected = journey?.collected ?? [];
@@ -689,6 +843,14 @@ function JourneyHub({
           ))}
         </div>
       )}
+
+      {/* Save / sync the collection across devices (Layer 2a). */}
+      <JourneySaveCard
+        collectedCount={collectedCount}
+        saved={emailSaved}
+        inert={saveInert}
+        onSave={onSave}
+      />
 
       {/* Grand finale, once every stop is collected */}
       {complete && (
@@ -1061,9 +1223,16 @@ export default function FanPage({
   // ── Initial campaign load ───────────────────────────────────────────
   useEffect(() => {
     if (isPreview) return;
-    sessionRef.current = getSessionId();
     setInApp(isInAppBrowser());
     let cancelled = false;
+
+    // Resolve the durable session id and load the campaign at the same time;
+    // only the tracking + progress calls below actually need the id, so the
+    // extra round-trip never delays first paint.
+    const sessionReady = resolveSessionId().then((sid) => {
+      if (!cancelled) sessionRef.current = sid;
+    });
+
     supabase
       .from("campaigns_public")
       .select("*")
@@ -1099,6 +1268,11 @@ export default function FanPage({
         if (!c.is_active || !locs?.length) {
           setStep("expired");
         }
+
+        // Both tracking and progress key off the session id, so wait for it.
+        await sessionReady;
+        if (cancelled) return;
+
         if (!viewTracked.current) {
           viewTracked.current = true;
           track("page_view");
@@ -1296,6 +1470,62 @@ export default function FanPage({
     const inRange = !!nearest && nearest.distanceM <= nearest.location.radius_m;
     attemptClaim(position.lat, position.lng, position.accuracy, inRange);
   }, [position, attemptClaim, isPreview]);
+
+  // Save the collection under an email (and pull in anything collected on the
+  // fan's other devices). The server may hand back the fan's shared identity
+  // session; we adopt it so this device stays in sync from here on.
+  const saveJourneyCollection = useCallback(
+    async (
+      email: string,
+      consent: boolean
+    ): Promise<{ ok: boolean; restoredCount?: number; error?: string }> => {
+      if (isPreview) return { ok: false, error: "preview" };
+      const cid = campaign?.id;
+      try {
+        const res = await fetch("/api/journey/restore", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            slug,
+            session_id: sessionRef.current,
+            email,
+            marketing_consent: consent,
+          }),
+        });
+        if (res.status === 429) {
+          return { ok: false, error: "Too many tries — give it a few minutes." };
+        }
+        const j = await res.json();
+        if (!res.ok || j.error || j.status === "expired") {
+          return {
+            ok: false,
+            error:
+              j.status === "expired"
+                ? "This drop has ended."
+                : "That didn't go through — check the address and try again.",
+          };
+        }
+        // Adopt the shared identity session so this device stays in sync.
+        if (j.session_id && j.session_id !== sessionRef.current) {
+          sessionRef.current = j.session_id;
+          try {
+            localStorage.setItem(SESSION_KEY, j.session_id);
+          } catch {}
+        }
+        setJourney({
+          progress: j.progress,
+          complete: j.complete,
+          collected: j.collected,
+          finale: j.finale,
+        });
+        if (cid) rememberEmailPrompt("done", cid);
+        return { ok: true, restoredCount: j.restored_count ?? 0 };
+      } catch {
+        return { ok: false, error: "Couldn't reach the server — try again." };
+      }
+    },
+    [slug, isPreview, campaign?.id, rememberEmailPrompt]
+  );
 
   // ── Battery/lifecycle: item 7 ────────────────────────────────────────
   useEffect(() => {
@@ -1687,6 +1917,9 @@ export default function FanPage({
             onTicket={() => {
               track("ticket_click");
             }}
+            emailSaved={emailPrompt === "done"}
+            saveInert={isPreview}
+            onSave={saveJourneyCollection}
           >
             <LocationsCard
               locations={locations}
