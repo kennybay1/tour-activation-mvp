@@ -17,10 +17,10 @@ export type FanMapLocation = {
 // A plain dot in the fan page's own accent colour — no ordinal badges, no
 // geofence circle. Fans don't need to see the unlock boundary; they just
 // need to find the spot.
-function markerIcon(): L.DivIcon {
+function markerIcon(collected: boolean): L.DivIcon {
   return L.divIcon({
     className: "",
-    html: `<div class="fan-map-marker"></div>`,
+    html: `<div class="fan-map-marker${collected ? " fan-map-marker--done" : ""}"></div>`,
     iconSize: [18, 18],
     iconAnchor: [9, 9],
   });
@@ -88,6 +88,7 @@ export default function FanMap({
   focusedId,
   focusNonce,
   fanPosition = null,
+  collectedIds,
 }: {
   locations: FanMapLocation[];
   // Tapping a location in the list sets these; a nonce (not just the id)
@@ -98,6 +99,8 @@ export default function FanMap({
   // The fan's own position, shown as a distinct pulsing dot. Client-side
   // only — it arrives from the browser's geolocation and goes nowhere else.
   fanPosition?: { lat: number; lng: number } | null;
+  // Ids of stops already collected on a journey — shown greyed out.
+  collectedIds?: Set<string>;
 }) {
   const mapRef = useRef<L.Map | null>(null);
   const markerRefs = useRef<Record<string, L.Marker | null>>({});
@@ -139,18 +142,23 @@ export default function FanMap({
             </Popup>
           </Marker>
         )}
-        {locations.map((l) => (
+        {locations.map((l) => {
+          const done = collectedIds?.has(l.id) ?? false;
+          return (
           <Marker
             key={l.id}
             position={[l.lat, l.lng]}
-            icon={markerIcon()}
+            icon={markerIcon(done)}
             ref={(instance) => {
               markerRefs.current[l.id] = instance;
             }}
           >
             <Popup>
               <div className="text-center">
-                <p className="font-medium text-ink">{l.location_name}</p>
+                <p className="font-medium text-ink">
+                  {l.location_name}
+                  {done ? " · collected" : ""}
+                </p>
                 <a
                   href={directionsUrlFor(l)}
                   target="_blank"
@@ -162,7 +170,8 @@ export default function FanMap({
               </div>
             </Popup>
           </Marker>
-        ))}
+          );
+        })}
       </MapContainer>
     </div>
   );

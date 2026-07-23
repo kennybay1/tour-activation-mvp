@@ -541,13 +541,20 @@ function DiscountCodeBlock({
       setTimeout(() => setCopied(false), 2000);
     } catch {}
   };
+  // Long codes shrink and wrap so they never spill out of the panel.
+  const sizeCls =
+    code.length > 22
+      ? "text-base tracking-normal"
+      : code.length > 14
+        ? "text-lg tracking-[0.08em]"
+        : "text-2xl tracking-[0.15em]";
   return (
     <div className="rounded-2xl bg-forest p-5 text-center text-parchment">
       <div className="rounded-xl border border-parchment/25 p-5">
         <p className="text-xs font-medium uppercase tracking-[0.3em] text-sage">
           {label}
         </p>
-        <p className="mt-3 font-mono text-2xl font-medium tracking-[0.15em]">
+        <p className={`mt-3 break-all font-mono font-medium ${sizeCls}`}>
           {code}
         </p>
         <button
@@ -605,6 +612,80 @@ function JourneyRewardCard({
         >
           Get tickets
         </button>
+      )}
+    </div>
+  );
+}
+
+// One collected stop shown as a collapsed button that expands to reveal what
+// was collected. The stop just unlocked opens by default; the rest start shut
+// so the list stays a tidy scannable stack of what's been found.
+function CollectedItem({
+  stop,
+  defaultOpen,
+  onTicket,
+}: {
+  stop: StopReward;
+  defaultOpen: boolean;
+  onTicket: (url?: string) => void;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div
+      className={`overflow-hidden rounded-2xl border ${
+        open ? "border-forest/50" : "border-ink/20"
+      }`}
+    >
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-3 px-4 py-3 text-left transition active:scale-[0.99]"
+      >
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-sm font-semibold text-ink">
+            {stop.location_name}
+          </span>
+          {stop.reward_teaser && !open && (
+            <span className="mt-0.5 block truncate text-xs text-ink/50">
+              {stop.reward_teaser}
+            </span>
+          )}
+        </span>
+        <span className="shrink-0 text-[0.7rem] font-medium uppercase tracking-[0.2em] text-forest">
+          Collected
+        </span>
+        <svg
+          aria-hidden
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className={`h-4 w-4 shrink-0 text-ink/40 transition-transform ${
+            open ? "rotate-180" : ""
+          }`}
+        >
+          <path d="m6 9 6 6 6-6" />
+        </svg>
+      </button>
+      {open && (
+        <div className="space-y-3 border-t border-ink/15 px-4 pb-4 pt-3">
+          {stop.reward_teaser && (
+            <p className="text-sm text-ink/60">{stop.reward_teaser}</p>
+          )}
+          {(stop.items ?? []).length > 0 && <RewardItems items={stop.items ?? []} />}
+          {stop.discount_code && <DiscountCodeBlock code={stop.discount_code} />}
+          {stop.ticket_url && (
+            <button
+              onClick={() => onTicket(stop.ticket_url)}
+              className="w-full rounded-full bg-clay py-3 text-sm font-bold text-cream transition active:scale-[0.98]"
+            >
+              Get tickets
+            </button>
+          )}
+        </div>
       )}
     </div>
   );
@@ -876,37 +957,6 @@ function JourneyHub({
         </p>
       </div>
 
-      {/* Your collection so far */}
-      {collected.length > 0 && (
-        <div className="space-y-3">
-          <p className="text-xs font-medium uppercase tracking-[0.3em] text-ink/50">
-            Your collection
-          </p>
-          {collected.map((s) => (
-            <JourneyRewardCard
-              key={s.location_id}
-              title={s.location_name}
-              teaser={s.reward_teaser}
-              items={s.items ?? []}
-              discountCode={s.discount_code}
-              ticketUrl={s.ticket_url}
-              onTicket={() => openTicket(s.ticket_url)}
-              highlight={justUnlocked?.location_id === s.location_id}
-            />
-          ))}
-        </div>
-      )}
-
-      {/* Save / sync the collection across devices (Layer 2a). */}
-      <JourneySaveCard
-        collectedCount={collectedCount}
-        saved={emailSaved}
-        inert={saveInert}
-        emailAvailable={emailAvailable}
-        onSave={onSave}
-        onSecureLink={onSecureLink}
-      />
-
       {/* Grand finale, once every stop is collected */}
       {complete && (
         <div className="space-y-3">
@@ -979,6 +1029,35 @@ function JourneyHub({
           </div>
         </>
       )}
+
+      {/* Your collection — sits below the unlock button. Each moment is a
+          button that expands to show what was collected; the one just
+          unlocked opens on its own. */}
+      {collected.length > 0 && (
+        <div className="space-y-3">
+          <p className="text-xs font-medium uppercase tracking-[0.3em] text-ink/50">
+            Your collection
+          </p>
+          {collected.map((s) => (
+            <CollectedItem
+              key={s.location_id}
+              stop={s}
+              defaultOpen={justUnlocked?.location_id === s.location_id}
+              onTicket={openTicket}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* Save / sync the collection across devices (Layer 2a). */}
+      <JourneySaveCard
+        collectedCount={collectedCount}
+        saved={emailSaved}
+        inert={saveInert}
+        emailAvailable={emailAvailable}
+        onSave={onSave}
+        onSecureLink={onSecureLink}
+      />
     </div>
   );
 }
@@ -1002,6 +1081,7 @@ function LocationsCard({
   focusedLocationId,
   focusNonce,
   onFocusLocation,
+  collectedIds,
 }: {
   locations: SpotLocation[];
   nearest: { location: SpotLocation; distanceM: number } | null;
@@ -1010,6 +1090,8 @@ function LocationsCard({
   focusedLocationId: string | null;
   focusNonce: number;
   onFocusLocation: (id: string) => void;
+  // Journey mode: stops already collected, shown greyed on the map.
+  collectedIds?: Set<string>;
 }) {
   // Only one spot gets a row above the map: the closest once we know where
   // the fan is. A lone location is trivially "closest" with no position at
@@ -1114,6 +1196,7 @@ function LocationsCard({
             focusedId={focusedLocationId}
             focusNonce={focusNonce}
             fanPosition={fanPosition}
+            collectedIds={collectedIds}
           />
         </MapErrorBoundary>
       </div>
@@ -1749,6 +1832,34 @@ export default function FanPage({
     [displayPosition, locations]
   );
   const roundedDistance = nearest ? roundLiveDistance(nearest.distanceM) : null;
+
+  // On a journey, a collected stop is done: the map greys it out, the
+  // "closest spot" card and distance point at the nearest stop STILL to
+  // find, and "update my distance" measures to that one instead.
+  const collectedIds = useMemo(
+    () => new Set((journey?.collected ?? []).map((c) => c.location_id)),
+    [journey]
+  );
+  const uncollectedLocations = useMemo(
+    () =>
+      isJourney ? locations.filter((l) => !collectedIds.has(l.id)) : locations,
+    [isJourney, locations, collectedIds]
+  );
+  const journeyNearest = useMemo(
+    () =>
+      displayPosition
+        ? nearestOf(
+            displayPosition.lat,
+            displayPosition.lng,
+            uncollectedLocations
+          )
+        : null,
+    [displayPosition, uncollectedLocations]
+  );
+  const journeyRoundedDistance = journeyNearest
+    ? roundLiveDistance(journeyNearest.distanceM)
+    : null;
+
   const canCheckAgain =
     !checking && Date.now() - lastClaimAttemptAtRef.current >= CLAIM_DEBOUNCE_MS;
 
@@ -2000,8 +2111,8 @@ export default function FanPage({
             justUnlocked={justUnlocked}
             totalStops={locations.length}
             nearMiss={nearMiss}
-            roundedDistance={roundedDistance}
-            nearestName={nearest?.location.location_name ?? null}
+            roundedDistance={journeyRoundedDistance}
+            nearestName={journeyNearest?.location.location_name ?? null}
             msRemaining={endsAtMs - now}
             onUnlock={beginTracking}
             busy={checking}
@@ -2017,12 +2128,13 @@ export default function FanPage({
           >
             <LocationsCard
               locations={locations}
-              nearest={nearest}
+              nearest={journeyNearest}
               fanPosition={displayPosition}
               locate={locate}
               focusedLocationId={focusedLocationId}
               focusNonce={focusNonce}
               onFocusLocation={focusLocation}
+              collectedIds={collectedIds}
             />
             {inAppBanner}
           </JourneyHub>

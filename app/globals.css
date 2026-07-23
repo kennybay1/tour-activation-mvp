@@ -138,6 +138,13 @@ body {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
 }
 
+/* A stop the fan has already collected on a journey — muted grey so the
+   still-to-find spots stand out as the live targets. */
+.fan-map-marker--done {
+  background: #9a958c;
+  opacity: 0.65;
+}
+
 /* The fan's own live position — forest, with a soft pulse, so it can't be
    confused with the clay spot pins. */
 .fan-map-you {
